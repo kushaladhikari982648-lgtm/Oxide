@@ -1,0 +1,12 @@
+[
+  {
+    "id": "copper",
+    "name": "Copper",
+    "summary": "Mobile performance suite: paces chunk streaming, gives the render thread an extra core, skips occlusion passes on tiled phone GPUs.",
+    "version": "1.0.0",
+    "file": "copper.hmod",
+    "page": "https://github.com/kushaladhikari982648-lgtm/Oxide/tree/copper-v1",
+    "author": "Oxide",
+    "downloads": 0
+  }
+]
