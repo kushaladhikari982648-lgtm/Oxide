@@ -22,7 +22,7 @@ use horizon_client::{
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use winit::{
     application::ApplicationHandler,
@@ -38,6 +38,8 @@ pub(super) struct Launcher {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     gui: Option<game::UiResources>,
+    wallpaper: Option<crate::wallpapers::LiveWallpaper>,
+    wallpaper_frame: Option<usize>,
     pub(super) audio: Option<horizon_client::audio::Audio>,
     game: Option<Box<dyn ApplicationHandler>>,
     cursor: (f64, f64),
@@ -56,6 +58,9 @@ pub(super) struct Launcher {
     login: login::Login,
     session_worker: Option<mpsc::Receiver<std::result::Result<Option<PathBuf>, String>>>,
     session_ready: bool,
+    // Redraw pacing: real events and visible animation ask for a frame at
+    // the display rate; an idle launcher sleeps until the next event.
+    redraw_now: bool,
     focus: Option<usize>,
     diagnostic_export: Option<mpsc::Receiver<std::result::Result<String, String>>>,
 }
@@ -83,6 +88,19 @@ impl Launcher {
             }
             catalog.status = "Previous Vulkan startup was interrupted. Using OpenGL ES recovery; you can change Rendering mode in Settings.".into();
         }
+        if catalog.status.is_empty() && catalog.config.low_end_tuned {
+            catalog.status = "Low-power GPU detected: starting on OpenGL ES at 67% resolution for stability. Rendering and Client resolution in Settings can change both.".into();
+        }
+        if catalog.status.is_empty() && catalog.config.no_vulkan {
+            catalog.status = "This device has no Vulkan driver: using Oxide's built-in OpenGL ES renderer.".into();
+        }
+        // Devices without a Vulkan driver (or with a saved OpenGL ES choice)
+        // never touch the system Vulkan loader: the built-in GLES renderer
+        // is configured before any window or game exists.
+        horizon_client::android_runtime::configure_graphics(
+            catalog.config.renderer == crate::catalog::RendererMode::OpenGl
+                || catalog.config.no_vulkan,
+        );
         crate::configure_input_mode(catalog.config.input_host);
         crate::device_runtime::configure(catalog.config.device);
         Self {
@@ -92,6 +110,8 @@ impl Launcher {
             window: None,
             renderer: None,
             gui: None,
+            wallpaper: None,
+            wallpaper_frame: None,
             audio: None,
             game: None,
             cursor: (0.0, 0.0),
@@ -110,6 +130,7 @@ impl Launcher {
             login: login::Login::new(),
             session_worker: None,
             session_ready: false,
+            redraw_now: true,
             focus: None,
             diagnostic_export: None,
         }
@@ -119,6 +140,7 @@ impl Launcher {
         if !horizon_client::android_runtime::take_launcher_return() {
             return;
         }
+        self.redraw_now = true;
         if let Some(mut game) = self.game.take() {
             game.exiting(events);
             drop(game);
@@ -185,7 +207,7 @@ impl Launcher {
             return Ok(());
         }
         let window = Arc::new(
-            events.create_window(Window::default_attributes().with_title("Horizon Android"))?,
+            events.create_window(Window::default_attributes().with_title("Oxide"))?,
         );
         crate::display::prepare(&window)?;
         let gui = game::UiResources {
@@ -195,12 +217,20 @@ impl Launcher {
                 pixels: [0u8; 4].repeat(6),
             }),
         };
+        if self.wallpaper.is_none()
+            && let Some(name) = self.catalog.config.wallpaper_name.clone()
+            && let Err(error) = crate::wallpapers::load_async(&self.home, &name)
+        {
+            self.catalog.status = format!("Could not load saved wallpaper: {error}");
+        }
         self.renderer = Some(game::loading_renderer(
             window.clone(),
             false,
             Some(&gui),
             None,
-            if self.catalog.config.renderer == crate::catalog::RendererMode::OpenGl {
+            if self.catalog.config.renderer == crate::catalog::RendererMode::OpenGl
+                || self.catalog.config.no_vulkan
+            {
                 horizon_client::graphics::GraphicsApi::OpenGl
             } else {
                 horizon_client::graphics::GraphicsApi::Auto
@@ -208,6 +238,7 @@ impl Launcher {
         )?);
         self.window = Some(window);
         self.gui = Some(gui);
+        self.wallpaper_frame = None;
         Ok(())
     }
 
@@ -218,13 +249,33 @@ impl Launcher {
         if self.login.pending() {
             return Ok(());
         }
+        // Copper is a first-party mod package: installing and enabling it
+        // turns the native mobile performance suite on for this session.
+        let copper = horizon_client::mod_list::ModList::load(
+            &self.catalog.config.game_home(&self.home),
+        )
+        .enabled
+        .contains("copper");
+        horizon_client::android_runtime::configure_copper(copper);
         crate::diagnostics::heartbeat(
             "play_requested",
-            || serde_json::json!({"renderer":self.catalog.config.renderer.label(),"resolution_percent":self.catalog.config.render_scale.percent()}),
+            || {
+                serde_json::json!({"renderer":self.catalog.config.renderer.label(),"resolution_percent":self.catalog.config.render_scale.percent(),"copper":copper,"fps_uncapped":self.catalog.config.fps_uncapped,"perf_preset":self.catalog.config.perf_preset.label()})
+            },
         );
         crate::configure_input_mode(self.catalog.config.input_host);
         crate::device_runtime::configure(self.catalog.config.device);
         if horizon_client::official_install::ready(&self.home) {
+            let game_home = self.catalog.config.game_home(&self.home);
+            // A graphics preset is written once, on the first launch after
+            // the install: later launches leave in-game tweaks alone. This
+            // must run before the frame-rate write, which creates the file.
+            if !game_home.join("options.txt").exists() {
+                self.catalog.config.apply_performance(&game_home);
+            }
+            // The launcher's frame-rate choice wins at every launch, so the
+            // Settings toggle is the one place players have to look at.
+            self.catalog.config.apply_frame_rate(&game_home);
             horizon_client::android_resources::repair_structure_transforms(
                 &self.home.join("engine-data.zip"),
                 &self
@@ -235,7 +286,8 @@ impl Launcher {
             crate::platform::hide();
             self.catalog.config.save(&self.home)?;
             horizon_client::android_runtime::configure_graphics(
-                self.catalog.config.renderer == crate::catalog::RendererMode::OpenGl,
+                self.catalog.config.renderer == crate::catalog::RendererMode::OpenGl
+                    || self.catalog.config.no_vulkan,
             );
             horizon_client::android_runtime::configure_gpu(
                 self.catalog.config.renderer == crate::catalog::RendererMode::Vulkan,
@@ -313,6 +365,10 @@ impl Launcher {
             self.renderer = None;
             self.window = None;
             self.gui = None;
+            // Release decoded GIF frames while Minecraft owns the mobile
+            // memory budget; the private source is decoded again on return.
+            self.wallpaper = None;
+            self.wallpaper_frame = None;
             horizon_client::ui_theme::reset_atlas();
             self.game = Some(game);
             self.game.as_mut().unwrap().resumed(events);
@@ -350,6 +406,7 @@ impl Launcher {
 impl ApplicationHandler for Launcher {
     fn resumed(&mut self, events: &ActiveEventLoop) {
         self.configure_screen();
+        self.redraw_now = true;
         if let Some(game) = &mut self.game {
             return game.resumed(events);
         }
@@ -369,6 +426,9 @@ impl ApplicationHandler for Launcher {
         }
     }
     fn window_event(&mut self, events: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.redraw_now = true;
+        }
         if crate::documents::handle_event(&event) {
             return;
         }
@@ -468,6 +528,7 @@ impl ApplicationHandler for Launcher {
         }
     }
     fn device_event(&mut self, events: &ActiveEventLoop, id: DeviceId, event: DeviceEvent) {
+        self.redraw_now = true;
         if let Some(game) = &mut self.game {
             game.device_event(events, id, event);
         } else {
@@ -541,6 +602,49 @@ impl ApplicationHandler for Launcher {
         for result in crate::gallery::poll() {
             self.catalog.status = result.unwrap_or_else(|e| format!("File export failed: {e}"));
         }
+        if let Some(completion) = crate::wallpapers::poll() {
+            self.redraw_now = true;
+            match completion.wallpaper {
+                Ok(mut wallpaper) => {
+                    if let Some(gui) = &self.gui
+                        && let Some(rect) = gui
+                            .atlas
+                            .sprites
+                            .get(horizon_client::hud::LAUNCHER_WALLPAPER_SPRITE)
+                    {
+                        let (width, height) = rect.texels((gui.atlas.width, gui.atlas.height));
+                        wallpaper.resize_to(width, height);
+                    }
+                    let name = wallpaper.name().to_owned();
+                    if !completion.from_saved_file {
+                        self.catalog.config.wallpaper_name = Some(name.clone());
+                    }
+                    self.wallpaper = Some(wallpaper);
+                    self.wallpaper_frame = None;
+                    self.catalog.status = if completion.from_saved_file {
+                        format!("Live wallpaper loaded: {name}")
+                    } else {
+                        match self.catalog.config.save(&self.home) {
+                            Ok(()) => format!("Live wallpaper set: {name}"),
+                            Err(error) => format!(
+                                "Wallpaper is active, but its setting was not saved: {error}"
+                            ),
+                        }
+                    };
+                }
+                Err(error) if completion.from_saved_file => {
+                    let _ = crate::wallpapers::remove(&self.home);
+                    self.catalog.config.wallpaper_name = None;
+                    self.catalog.status = match self.catalog.config.save(&self.home) {
+                        Ok(()) => format!("Saved wallpaper could not be loaded: {error}"),
+                        Err(save_error) => format!(
+                            "Saved wallpaper could not be loaded: {error}. Could not clear its setting: {save_error}"
+                        ),
+                    };
+                }
+                Err(error) => self.catalog.status = error,
+            }
+        }
         self.login.poll();
         if let Some(result) = self.session_worker.as_ref().and_then(|w| w.try_recv().ok()) {
             self.session_worker = None;
@@ -556,12 +660,43 @@ impl ApplicationHandler for Launcher {
             }
         }
 
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        // Avoid wasting CPU/GPU on Helio A22 devices while idle. Visible UI
+        // animation is event-driven, GIFs use frame deadlines, and wallpaper
+        // import/loading is polled at 100 ms.
+        let animating = self.feedback.is_some()
+            || self.catalog.editing.is_some()
+            || self.catalog.animating()
+            || self.worker.is_some()
+            || self.session_worker.is_some()
+            || self.diagnostic_export.is_some()
+            || self.login.visible
+            || crate::documents::busy();
+        let now = Instant::now();
+        let mut wake_at = None;
+        if let Some(wallpaper) = self
+            .wallpaper
+            .as_ref()
+            .filter(|wallpaper| wallpaper.is_animated())
+        {
+            if self.wallpaper_frame != Some(wallpaper.frame(now).0) {
+                self.redraw_now = true;
+            }
+            wake_at = Some(now + wallpaper.until_next_frame(now));
         }
-        events.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(100),
-        ));
+        if crate::wallpapers::busy() {
+            let poll_at = now + std::time::Duration::from_millis(100);
+            wake_at = Some(wake_at.map_or(poll_at, |deadline: Instant| deadline.min(poll_at)));
+        }
+        // Repaint only after real events or while the rest of the launcher
+        // visibly animates. The GIF timer schedules its own frame deadlines;
+        // worker polling wakes every 100 ms without spinning the renderer.
+        if animating || self.redraw_now {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        self.redraw_now = false;
+        events.set_control_flow(wake_at.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
     fn exiting(&mut self, events: &ActiveEventLoop) {
         if let Some(game) = &mut self.game {

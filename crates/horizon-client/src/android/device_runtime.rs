@@ -215,3 +215,51 @@ pub fn preferences() -> crate::device_preferences::Settings {
         gpu_profile: bits & (1 << 17) != 0,
     }
 }
+
+/// Reads a read-only Android system property such as `ro.hardware.egl`.
+fn system_property(name: &str) -> String {
+    const VALUE_MAX: usize = 92; // PROP_VALUE_MAX
+    unsafe extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
+    }
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return String::new();
+    };
+    let mut value = [0u8; VALUE_MAX];
+    let length = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr().cast()) };
+    if length <= 0 {
+        return String::new();
+    }
+    let length = (length as usize).min(VALUE_MAX - 1);
+    String::from_utf8_lossy(&value[..length]).into_owned()
+}
+
+/// True when the system ships a Vulkan driver at all. Some Android devices
+/// have none; Oxide's built-in OpenGL ES renderer (wgpu on GLES, entirely
+/// in-app Rust) is the guaranteed rendering path there, so the launcher and
+/// the game never touch the missing system Vulkan loader.
+pub fn vulkan_available() -> bool {
+    !system_property("ro.hardware.vulkan").is_empty()
+}
+
+/// True on boards whose Vulkan driver renders but glitches: PowerVR
+/// GE-series GPUs (Helio A22/A25/P22/P35 class, GE8300/GE8320) and the
+/// entry MediaTek platforms that carry them. The OpenGL ES backend is the
+/// stable path there, so fresh installs default to it and to a gentler
+/// resolution; an explicit player choice always wins.
+pub fn low_end_gpu() -> bool {
+    for key in ["ro.hardware.egl", "ro.hardware.vulkan"] {
+        if system_property(key)
+            .to_ascii_lowercase()
+            .contains("powervr")
+        {
+            return true;
+        }
+    }
+    matches!(
+        system_property("ro.board.platform")
+            .to_ascii_lowercase()
+            .as_str(),
+        "mt6739" | "mt6761" | "mt6762" | "mt6765" | "mt8768"
+    )
+}

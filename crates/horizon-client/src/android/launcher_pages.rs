@@ -1,5 +1,6 @@
 use super::*;
-use horizon_client::{osk::Output, ui_theme::color};
+use crate::mc_ui::{self, Kind, color};
+use horizon_client::osk::Output;
 use winit::{
     event::{KeyEvent, Touch},
     keyboard::{KeyCode, PhysicalKey},
@@ -56,8 +57,56 @@ pub(super) enum Action {
     ChooseDisplayHz(u16),
     PerformanceHints,
     GpuProfile,
+    FpsCap,
+    PerfPreset,
+    UiOpacity,
+    Wallpaper,
+    ClearWallpaper,
 }
 
+/// Is `point` (dp) inside `rect`?
+fn hit(rect: [f32; 4], point: [f32; 2]) -> bool {
+    point[0] >= rect[0]
+        && point[0] <= rect[0] + rect[2]
+        && point[1] >= rect[1]
+        && point[1] <= rect[1] + rect[3]
+}
+
+/// The bevel kind an action's button wears: green for the primary action,
+/// red for destructive confirmations, dark plates for tabs and quiet links,
+/// stone for everything else.
+fn button_kind(action: Action, accent: bool) -> Kind {
+    if accent {
+        return Kind::Green;
+    }
+    match action {
+        Action::Page(_)
+        | Action::Repository
+        | Action::ShaderSource(_)
+        | Action::ModSource(_)
+        | Action::ToggleSection(_) => Kind::Dark,
+        Action::DeleteLocal(_) | Action::ConfirmDeleteLocal => Kind::Red,
+        _ => Kind::Stone,
+    }
+}
+
+/// The pixel-face label size for a button rect: bigger for the tall Play
+/// button, smaller for narrow ones.
+fn button_font(rect: [f32; 4]) -> f32 {
+    let [_, _, w, h] = rect;
+    if h >= 56.0 {
+        20.0
+    } else if w < 80.0 {
+        13.0
+    } else {
+        16.0
+    }
+}
+
+/// Draws a widget for `action` and registers its tap target. `press` is the
+/// rect being held (or tapped in the last 160 ms), so the widget can draw
+/// vanilla's pressed bevel in the same pass. Field actions draw an edit box
+/// instead of a button.
 pub(super) fn button(
     ui: &mut Ui,
     targets: &mut Vec<([f32; 4], Action)>,
@@ -65,37 +114,23 @@ pub(super) fn button(
     label: &str,
     action: Action,
     accent: bool,
+    press: Option<[f32; 4]>,
 ) {
-    let [x, y, w, h] = rect;
-    ui.rounded(
-        x,
-        y,
-        w,
-        h,
-        2.0,
-        if accent { color::ACCENT } else { color::RAISED },
-    );
-    let padding = (w * 0.12).clamp(4.0, 12.0);
-    let base = if w < 80.0 { 13.0 } else { 16.0 };
+    if matches!(action, Action::Field(_)) {
+        mc_ui::field(ui, rect, label, 15.0, false);
+        targets.push((rect, action));
+        return;
+    }
+    let kind = button_kind(action, accent);
+    let pressed = press == Some(rect);
+    let base = button_font(rect);
     let font = if matches!(action, Action::Page(_)) {
-        (base * ((w - 2.0 * padding) / ui.measure(Face::Medium, base, label).max(1.0)).min(1.0))
-            .max(9.0)
+        let [_, _, w, _] = rect;
+        (base * ((w - 16.0) / ui.measure(Face::Pixel, base, label).max(1.0)).min(1.0)).max(9.0)
     } else {
         base
     };
-    let label = ui.fit_text(Face::Medium, font, label, w - 2.0 * padding);
-    ui.text(
-        Face::Medium,
-        font,
-        x + padding,
-        y + 11.0,
-        if accent {
-            color::ON_ACCENT
-        } else {
-            color::TEXT
-        },
-        &label,
-    );
+    mc_ui::button(ui, rect, label, kind, pressed, font);
     targets.push((rect, action));
 }
 fn toggle(
@@ -104,33 +139,18 @@ fn toggle(
     rect: [f32; 4],
     on: bool,
     action: Action,
+    press: Option<[f32; 4]>,
 ) {
-    let [x, y, w, h] = rect;
-    ui.text(
-        Face::Regular,
+    // Vanilla's ON/OFF button: a green plate when on, stone when off.
+    mc_ui::button(
+        ui,
+        rect,
+        if on { "ON" } else { "OFF" },
+        if on { Kind::Green } else { Kind::Stone },
+        press == Some(rect),
         14.0,
-        x,
-        y + 11.0,
-        color::TEXT,
-        if on { "On" } else { "Off" },
     );
-    ui.rounded(
-        x + w - 52.0,
-        y + 8.0,
-        48.0,
-        24.0,
-        12.0,
-        if on { color::TEXT } else { color::HOVER },
-    );
-    ui.rounded(
-        x + w - if on { 26.0 } else { 50.0 },
-        y + 10.0,
-        20.0,
-        20.0,
-        10.0,
-        if on { color::BG } else { color::TEXT },
-    );
-    targets.push(([x, y, w, h], action));
+    targets.push((rect, action));
 }
 impl Launcher {
     /// The same spatial focus algorithm as the game's controller menus.
@@ -192,16 +212,71 @@ impl Launcher {
     }
 
     pub(super) fn draw_pages(&mut self) -> Result<()> {
+        if let (Some(wallpaper), Some(gui)) = (self.wallpaper.as_mut(), self.gui.as_ref())
+            && let Some(rect) = gui
+                .atlas
+                .sprites
+                .get(horizon_client::hud::LAUNCHER_WALLPAPER_SPRITE)
+        {
+            let (width, height) = rect.texels((gui.atlas.width, gui.atlas.height));
+            wallpaper.resize_to(width, height);
+        }
         let (Some(r), Some(gui)) = (&mut self.renderer, &self.gui) else {
             return Ok(());
         };
         if r.suspended {
             return Ok(());
         }
-        self.targets.clear();
+        // The previous frame's targets: the layout only moves when a drag
+        // scrolls it, so hit-testing last frame's rects finds the widget under
+        // a held finger and lets it draw vanilla's pressed bevel in one pass.
+        let previous = std::mem::take(&mut self.targets);
         self.list_targets.clear();
         self.list_view = None;
         let mut b = HudBatch::new([r.config.width, r.config.height]);
+        if let Some(wallpaper) = self.wallpaper.as_ref() {
+            let (index, frame) = wallpaper.frame(Instant::now());
+            if let Some(rect) = gui
+                .atlas
+                .sprites
+                .get(horizon_client::hud::LAUNCHER_WALLPAPER_SPRITE)
+                .copied()
+            {
+                if self.wallpaper_frame != Some(index) {
+                    let (width, height) = rect.texels((gui.atlas.width, gui.atlas.height));
+                    let x = (rect.u0 * gui.atlas.width as f32).round() as u32;
+                    let y = (rect.v0 * gui.atlas.height as f32).round() as u32;
+                    b.patches.push(horizon_client::font::Patch {
+                        x,
+                        y,
+                        width,
+                        height,
+                        rgba: frame.rgba.clone(),
+                    });
+                    self.wallpaper_frame = Some(index);
+                }
+                let (source_width, source_height) =
+                    horizon_client::hud::LAUNCHER_WALLPAPER_SIZE;
+                let source_aspect = source_width as f32 / source_height as f32;
+                let (x, y, width, height) = if b.width / b.height > source_aspect {
+                    let height = b.width / source_aspect;
+                    (0.0, (b.height - height) / 2.0, b.width, height)
+                } else {
+                    let width = b.height * source_aspect;
+                    ((b.width - width) / 2.0, 0.0, width, b.height)
+                };
+                b.sprite_scaled(
+                    &gui.atlas,
+                    horizon_client::hud::LAUNCHER_WALLPAPER_SPRITE,
+                    x,
+                    y,
+                    width,
+                    height,
+                    u32::MAX,
+                );
+            }
+        }
+        let ui_opacity_start = b.vertices.len();
         let mut ui = Ui::mobile(&gui.atlas, &mut b, (0.0, 0.0));
         // OEM navigation bars can remain visible even in fullscreen (keypad phones).
         // Inset the launcher layout only; keep surface and input coordinates intact.
@@ -220,22 +295,45 @@ impl Launcher {
             ui.h = ui.h.min(bottom as f32 / ui.density);
         }
         let (w, h) = (ui.w, ui.h);
+        let point = [
+            self.cursor.0 as f32 / ui.density,
+            self.cursor.1 as f32 / ui.density,
+        ];
+        let holding = self.mouse_down || self.drag.as_ref().is_some_and(|drag| !drag.moved);
+        let press = if holding {
+            previous
+                .iter()
+                .rev()
+                .find(|(rect, _)| hit(*rect, point))
+                .map(|(rect, _)| *rect)
+        } else {
+            self.feedback
+                .filter(|(_, time)| time.elapsed() < std::time::Duration::from_millis(160))
+                .and_then(|(action, _)| {
+                    previous
+                        .iter()
+                        .find(|(_, a)| *a == action)
+                        .map(|(rect, _)| *rect)
+                })
+        };
+        // Hand the allocation back: the frame rebuilds the same list.
+        let mut previous = previous;
+        previous.clear();
+        self.targets = previous;
         let scale = ui.density / ui.batch.scale;
         ui.batch
-            .fill(&gui.atlas, 0.0, 0.0, w * scale, h * scale, color::BG);
-        ui.text(
-            Face::Medium,
-            if w < 400.0 {
-                20.0
-            } else if w < 700.0 {
-                24.0
-            } else {
-                32.0
-            },
-            32.0,
-            if w < 700.0 { 12.0 } else { 28.0 },
+            .fill(&gui.atlas, 0.0, 0.0, w * scale, h * scale, color::PAGE);
+        let title_size = if w < 400.0 { 18.0 } else if w < 700.0 { 22.0 } else { 28.0 };
+        let title_y = if w < 700.0 { 12.0 } else { 28.0 };
+        mc_ui::grass_mark(&mut ui, 32.0, title_y + 1.0, title_size);
+        mc_ui::shadow_text(
+            &mut ui,
+            Face::Pixel,
+            title_size,
+            32.0 + title_size + 10.0,
+            title_y,
             color::TEXT,
-            &format!("Horizon Android {}", crate::backend::VERSION),
+            &format!("Oxide {}", crate::backend::VERSION),
         );
         button(
             &mut ui,
@@ -249,6 +347,7 @@ impl Launcher {
             &self.login.status(&self.catalog.config.name),
             Action::Account,
             self.login.signed_in,
+            press,
         );
         let tabs = Page::ALL.len() as f32;
         let tab_margin = if w < 700.0 { 16.0 } else { 32.0 };
@@ -270,6 +369,7 @@ impl Launcher {
                 },
                 Action::Page(*page),
                 *page == self.catalog.page,
+                press,
             );
         }
         let compact = w < 700.0;
@@ -280,9 +380,10 @@ impl Launcher {
             let installing = self.worker.is_some();
             let progress = *self.install.lock().unwrap();
             let top = 160.0;
-            ui.text(
-                Face::Medium,
-                32.0,
+            mc_ui::shadow_text(
+                &mut ui,
+                Face::Pixel,
+                28.0,
                 32.0,
                 top,
                 color::TEXT,
@@ -290,12 +391,10 @@ impl Launcher {
                     "Getting your game ready"
                 } else if installed {
                     "Ready to play"
+                } else if compact {
+                    "Your Java worlds"
                 } else {
-                    if compact {
-                        "Your Java worlds"
-                    } else {
-                        "Your Java worlds, on Android"
-                    }
+                    "Your Java worlds, on Android"
                 },
             );
             ui.text(
@@ -306,6 +405,16 @@ impl Launcher {
                 color::MUTED,
                 &format!("Minecraft 26.3  /  Profile {}", self.catalog.config.profile),
             );
+            if !installing && self.catalog.copper_on {
+                ui.text(
+                    Face::Regular,
+                    15.0,
+                    32.0,
+                    top + 72.0,
+                    color::GREEN_TEXT,
+                    "Copper performance suite: on",
+                );
+            }
             if installing {
                 let current = InstallStage::ALL
                     .iter()
@@ -315,28 +424,42 @@ impl Launcher {
                 if h >= 620.0 {
                     for (index, stage) in InstallStage::ALL.iter().enumerate() {
                         let y = top + 90.0 + index as f32 * row_height;
-                        let label = if index < current {
-                            format!("{:02}  {}  - done", index + 1, stage.label())
-                        } else {
-                            format!("{:02}  {}", index + 1, stage.label())
-                        };
+                        // The stage number in the pixel face: green once done,
+                        // white while running, dim ahead.
+                        let number = format!("{:02}", index + 1);
+                        ui.text(
+                            Face::Pixel,
+                            15.0,
+                            32.0,
+                            y,
+                            if index < current {
+                                color::GREEN_TEXT
+                            } else if index == current {
+                                color::TEXT
+                            } else {
+                                color::FAINT
+                            },
+                            &number,
+                        );
                         ui.text(
                             Face::Regular,
                             16.0,
-                            32.0,
-                            y,
+                            66.0,
+                            y + 1.0,
                             if index == current {
                                 color::TEXT
-                            } else {
+                            } else if index < current {
                                 color::MUTED
+                            } else {
+                                color::FAINT
                             },
-                            &label,
+                            stage.label(),
                         );
                     }
                 } else {
                     ui.text(
-                        Face::Regular,
-                        18.0,
+                        Face::Pixel,
+                        17.0,
                         32.0,
                         top + 100.0,
                         color::TEXT,
@@ -357,11 +480,8 @@ impl Launcher {
                     0.0
                 };
                 let overall = (current as f32 + fraction.clamp(0.0, 1.0)) / 6.0;
-                let bar_y = h - 152.0;
-                ui.rounded(32.0, bar_y, w - 64.0, 4.0, 2.0, color::RAISED);
-                if overall > 0.0 {
-                    ui.rounded(32.0, bar_y, (w - 64.0) * overall, 4.0, 2.0, color::ACCENT);
-                }
+                let bar_y = h - 156.0;
+                mc_ui::progress(&mut ui, [32.0, bar_y, w - 64.0, 12.0], overall);
                 let detail = match progress.stage {
                     InstallStage::Download => format!(
                         "{:.1} / {:.1} MiB  - verified downloads",
@@ -372,47 +492,43 @@ impl Launcher {
                         "{} / {} control files verified",
                         progress.done, progress.total
                     ),
-                    _ => "Please keep Horizon open. Downloaded files are kept for retry.".into(),
+                    _ => "Please keep Oxide open. Downloaded files are kept for retry.".into(),
                 };
                 ui.text(
                     Face::Regular,
                     14.0,
                     32.0,
-                    bar_y + 12.0,
+                    bar_y + 20.0,
                     color::MUTED,
                     &detail,
                 );
             } else {
                 let rows = if installed {
                     [
-                        "01  Open a world or join a Java server",
-                        "02  Touch setup: Options > Controls",
-                        "03  Find packs and .hmod in the tabs",
+                        ("01", "Open a world or join a Java server"),
+                        ("02", "Touch setup: Options > Controls"),
+                        ("03", "Find packs and .hmod in the tabs"),
                     ]
                 } else {
                     [
-                        "01  Download resources from Mojang",
-                        "02  Install and verify on this phone",
-                        "03  Play offline or sign in for servers",
+                        ("01", "Download resources from Mojang"),
+                        ("02", "Install and verify on this phone"),
+                        ("03", "Play offline or sign in for servers"),
                     ]
                 };
-                for (index, line) in rows.iter().enumerate() {
-                    ui.text(
-                        Face::Regular,
-                        17.0,
-                        32.0,
-                        top + 100.0 + index as f32 * 42.0,
-                        color::MUTED,
-                        line,
-                    );
+                for (index, (number, line)) in rows.iter().enumerate() {
+                    let y = top + 100.0 + index as f32 * 42.0;
+                    ui.text(Face::Pixel, 16.0, 32.0, y, color::GREEN_TEXT, number);
+                    ui.text(Face::Regular, 16.0, 70.0, y + 1.0, color::MUTED, line);
                 }
             }
             if installing {
-                ui.text(
-                    Face::Medium,
-                    19.0,
+                mc_ui::shadow_text(
+                    &mut ui,
+                    Face::Pixel,
+                    18.0,
                     32.0,
-                    h - 90.0,
+                    h - 92.0,
                     color::TEXT,
                     progress.stage.label(),
                 );
@@ -430,12 +546,14 @@ impl Launcher {
                     },
                     Action::Play,
                     true,
+                    press,
                 );
             }
         } else if page.is_catalog() {
-            ui.text(
-                Face::Medium,
-                18.0,
+            mc_ui::shadow_text(
+                &mut ui,
+                Face::Pixel,
+                20.0,
                 32.0,
                 142.0,
                 color::TEXT,
@@ -462,6 +580,7 @@ impl Launcher {
                 ),
                 Action::Field("search"),
                 false,
+                press,
             );
             button(
                 &mut ui,
@@ -474,31 +593,52 @@ impl Launcher {
                 },
                 Action::Search,
                 true,
+                press,
             );
             if matches!(page, Page::Shaders | Page::Mods) {
                 use crate::shader_catalog::Origin;
-                let width = ((w - 185.0) / 2.0).clamp(58.0, 120.0);
-                for (i, origin) in [Origin::Horizon, Origin::Modrinth].into_iter().enumerate() {
-                    let rect = [w - 32.0 - (2 - i) as f32 * width, 134.0, width - 5.0, 32.0];
+                let origins: &[Origin] = if page == Page::Mods {
+                    &[Origin::Horizon, Origin::Modrinth, Origin::Oxide]
+                } else {
+                    &[Origin::Horizon, Origin::Modrinth]
+                };
+                let width = ((w - 185.0) / origins.len() as f32).clamp(48.0, 120.0);
+                for (i, origin) in origins.iter().enumerate() {
+                    let rect = [
+                        w - 32.0 - (origins.len() - i) as f32 * width,
+                        134.0,
+                        width - 5.0,
+                        32.0,
+                    ];
                     button(
                         &mut ui,
                         &mut self.targets,
                         rect,
-                        origin.source().label(),
+                        origin.label(),
                         if page == Page::Mods {
-                            Action::ModSource(origin)
+                            Action::ModSource(*origin)
                         } else {
-                            Action::ShaderSource(origin)
+                            Action::ShaderSource(*origin)
                         },
                         false,
+                        press,
                     );
                     if (if page == Page::Mods {
                         self.catalog.config.mod_source
                     } else {
                         self.catalog.config.shader_source
-                    }) == origin
+                    }) == *origin
                     {
-                        ui.border(rect[0], rect[1], rect[2], rect[3], 1.0, color::TEXT);
+                        // The chosen source wears a green frame, like a
+                        // selected inventory slot.
+                        ui.border(
+                            rect[0] - 2.0,
+                            rect[1] - 2.0,
+                            rect[2] + 4.0,
+                            rect[3] + 4.0,
+                            0.0,
+                            color::GREEN_FACE,
+                        );
                     }
                 }
             }
@@ -508,6 +648,12 @@ impl Launcher {
                         == crate::shader_catalog::Origin::Modrinth =>
                 {
                     "Modrinth Java mods are browse-only; Fabric/Forge/NeoForge cannot run here"
+                }
+                Page::Mods
+                    if self.catalog.config.mod_source
+                        == crate::shader_catalog::Origin::Oxide =>
+                {
+                    "Oxide first-party mods: Copper, the mobile performance suite"
                 }
                 Page::Mods => "Search Horizon mods or paste an HTTPS .hmod link",
                 Page::Shaders
@@ -534,6 +680,7 @@ impl Launcher {
                 "Open folder",
                 Action::OpenFolder(kind),
                 false,
+                press,
             );
             button(
                 &mut ui,
@@ -542,6 +689,7 @@ impl Launcher {
                 "Import file",
                 Action::Import(kind),
                 false,
+                press,
             );
             let top = 296.0;
             let bottom = h - 112.0;
@@ -568,12 +716,32 @@ impl Launcher {
                 if y < top || y + 70.0 > bottom {
                     continue;
                 }
-                let title = ui.fit_text(Face::Medium, 19.0, &p.title, w - 214.0);
-                let summary = ui.fit_text(Face::Regular, 14.0, &p.summary, w - 214.0);
-                ui.text(Face::Medium, 19.0, 32.0, y, color::TEXT, &title);
-                ui.text(Face::Regular, 14.0, 32.0, y + 29.0, color::MUTED, &summary);
+                // Each result sits in a slot, like a vanilla list entry.
+                mc_ui::slot(&mut ui, [28.0, y - 2.0, w - 56.0, 74.0], false);
+                let title = ui.fit_text(Face::Pixel, 18.0, &p.title, w - 222.0);
+                let summary = ui.fit_text(Face::Regular, 14.0, &p.summary, w - 222.0);
+                ui.text(Face::Pixel, 18.0, 42.0, y + 6.0, color::TEXT, &title);
+                ui.text(
+                    Face::Regular,
+                    14.0,
+                    42.0,
+                    y + 38.0,
+                    color::MUTED,
+                    &summary,
+                );
                 if let Some(state) = download {
-                    ui.text(Face::Medium, 16.0, w - 150.0, y + 12.0, color::TEXT, &state);
+                    ui.text(
+                        Face::Pixel,
+                        15.0,
+                        w - 150.0,
+                        y + 12.0,
+                        if state == "Installed" {
+                            color::GREEN_TEXT
+                        } else {
+                            color::TEXT
+                        },
+                        &state,
+                    );
                 } else if p.kind == crate::browser::Kind::Mod
                     && p.source == crate::browser::SourceId::Modrinth
                 {
@@ -594,16 +762,6 @@ impl Launcher {
                         color::MUTED,
                         ".hnmod: later",
                     );
-                } else if p.kind == crate::browser::Kind::Mod && !cfg!(target_pointer_width = "64")
-                {
-                    ui.text(
-                        Face::Regular,
-                        14.0,
-                        w - 150.0,
-                        y + 12.0,
-                        color::MUTED,
-                        "64-bit required",
-                    );
                 } else {
                     button(
                         &mut ui,
@@ -612,6 +770,7 @@ impl Launcher {
                         self.catalog.install_button(p),
                         Action::Install(i),
                         false,
+                        press,
                     );
                 }
             }
@@ -622,6 +781,7 @@ impl Launcher {
                 "Previous",
                 Action::Previous,
                 false,
+                press,
             );
             button(
                 &mut ui,
@@ -630,6 +790,7 @@ impl Launcher {
                 "Next",
                 Action::Next,
                 false,
+                press,
             );
         } else if page == Page::Installed {
             use horizon_client::content_files::Kind;
@@ -676,6 +837,7 @@ impl Launcher {
                         &label,
                         Action::ToggleSection(section),
                         false,
+                        press,
                     );
                     button(
                         &mut ui,
@@ -684,6 +846,7 @@ impl Launcher {
                         "Import",
                         Action::Import(kind),
                         false,
+                        press,
                     );
                 }
                 offset += 48.0;
@@ -715,29 +878,34 @@ impl Launcher {
                     if y < top || y + row_height - 4.0 > bottom {
                         continue;
                     }
-                    let title = ui.fit_text(
-                        Face::Medium,
-                        19.0,
-                        &item.title,
-                        if compact { w - 64.0 } else { w - 364.0 },
+                    mc_ui::slot(
+                        &mut ui,
+                        [28.0, y - 2.0, w - 56.0, row_height - 4.0],
+                        item.enabled,
                     );
-                    ui.text(Face::Medium, 19.0, 32.0, y, color::TEXT, &title);
+                    let title = ui.fit_text(
+                        Face::Pixel,
+                        18.0,
+                        &item.title,
+                        if compact { w - 84.0 } else { w - 384.0 },
+                    );
+                    ui.text(Face::Pixel, 18.0, 42.0, y + 4.0, color::TEXT, &title);
                     ui.text(
                         Face::Regular,
-                        14.0,
-                        32.0,
-                        y + 28.0,
+                        13.0,
+                        42.0,
+                        y + 32.0,
                         color::MUTED,
-                        kind.label(),
+                        item.java.as_deref().unwrap_or_else(|| kind.label()),
                     );
-                    if kind == Kind::Mods && !cfg!(target_pointer_width = "64") {
+                    if item.java.is_some() {
                         ui.text(
                             Face::Regular,
                             14.0,
                             if compact { 32.0 } else { w - 300.0 },
                             y + if compact { 62.0 } else { 12.0 },
                             color::MUTED,
-                            "64-bit required",
+                            "Java mod: cannot run",
                         );
                     } else {
                         toggle(
@@ -751,6 +919,7 @@ impl Launcher {
                             ],
                             item.enabled,
                             Action::ToggleLocal(i),
+                            press,
                         );
                     }
                     button(
@@ -760,14 +929,16 @@ impl Launcher {
                         "Remove",
                         Action::DeleteLocal(i),
                         false,
+                        press,
                     );
                 }
             }
         } else {
             let c = &self.catalog.config;
-            ui.text(
-                Face::Medium,
-                24.0,
+            mc_ui::shadow_text(
+                &mut ui,
+                Face::Pixel,
+                22.0,
                 32.0,
                 156.0,
                 color::TEXT,
@@ -777,12 +948,25 @@ impl Launcher {
             self.catalog.scroll = self
                 .catalog
                 .scroll
-                .clamp(0.0, (15.0 * row_height - (h - 130.0 - 195.0)).max(0.0));
+                .clamp(0.0, (20.0 * row_height - (h - 130.0 - 195.0)).max(0.0));
             self.list_view = Some([
                 195.0,
                 h - 130.0,
-                (15.0 * row_height - (h - 130.0 - 195.0)).max(0.0),
+                (20.0 * row_height - (h - 130.0 - 195.0)).max(0.0),
             ]);
+            let wallpaper_label = c
+                .wallpaper_name
+                .as_deref()
+                .map(|name| {
+                    let mut chars = name.chars();
+                    let short: String = chars.by_ref().take(24).collect();
+                    if chars.next().is_some() {
+                        format!("{short}...")
+                    } else {
+                        short
+                    }
+                })
+                .unwrap_or_else(|| "Tap to choose animated GIF".into());
             for (i, (title, value, action)) in [
                 ("Rendering", c.renderer.label().to_owned(), Action::Renderer),
                 (
@@ -820,6 +1004,37 @@ impl Launcher {
                     "Display refresh rate",
                     c.device.display_label(),
                     Action::DisplayHz,
+                ),
+                (
+                    "Frame rate",
+                    if c.fps_uncapped {
+                        "Uncapped / VSync off"
+                    } else {
+                        "VSync / display rate"
+                    }
+                    .into(),
+                    Action::FpsCap,
+                ),
+                (
+                    "Graphics preset",
+                    c.perf_preset.label().to_owned(),
+                    Action::PerfPreset,
+                ),
+                (
+                    "Launcher UI opacity",
+                    format!("{}%", c.launcher_opacity.clamp(30, 100)),
+                    Action::UiOpacity,
+                ),
+                ("Custom live wallpaper", wallpaper_label, Action::Wallpaper),
+                (
+                    "Clear live wallpaper",
+                    if c.wallpaper_name.is_some() {
+                        "Remove current wallpaper"
+                    } else {
+                        "No wallpaper selected"
+                    }
+                    .into(),
+                    Action::ClearWallpaper,
                 ),
                 (
                     "Performance hints",
@@ -897,7 +1112,7 @@ impl Launcher {
                 );
                 if matches!(
                     action,
-                    Action::PerformanceHints | Action::Immersive | Action::Cutout
+                    Action::PerformanceHints | Action::Immersive | Action::Cutout | Action::FpsCap
                 ) {
                     toggle(
                         &mut ui,
@@ -912,9 +1127,11 @@ impl Launcher {
                             Action::PerformanceHints => c.device.performance_hints,
                             Action::Immersive => c.screen.immersive,
                             Action::Cutout => c.screen.avoid_cutout,
+                            Action::FpsCap => c.fps_uncapped,
                             _ => c.device.gpu_profile,
                         },
                         action,
+                        press,
                     );
                 } else {
                     button(
@@ -946,16 +1163,10 @@ impl Launcher {
                         ),
                         action,
                         false,
+                        press,
                     );
                 }
-                ui.rounded(
-                    32.0,
-                    y + if compact { 78.0 } else { 62.0 },
-                    w - 64.0,
-                    1.0,
-                    0.0,
-                    color::BORDER,
-                );
+                mc_ui::divider(&mut ui, 32.0, y + if compact { 78.0 } else { 62.0 }, w - 64.0);
             }
             button(
                 &mut ui,
@@ -964,6 +1175,7 @@ impl Launcher {
                 "Microsoft / Xbox account",
                 Action::Account,
                 true,
+                press,
             );
             button(
                 &mut ui,
@@ -972,9 +1184,15 @@ impl Launcher {
                 "Diagnostics",
                 Action::Logs,
                 false,
+                press,
             );
         }
         let status = self.error.as_deref().unwrap_or(&self.catalog.status);
+        let status_color = if self.error.is_some() {
+            color::ERROR
+        } else {
+            color::MUTED
+        };
         for (i, line) in status
             .chars()
             .collect::<Vec<_>>()
@@ -987,7 +1205,7 @@ impl Launcher {
                 14.0,
                 32.0,
                 h - 47.0 + i as f32 * 18.0,
-                color::MUTED,
+                status_color,
                 &ui.fit_text(
                     Face::Regular,
                     14.0,
@@ -1003,6 +1221,7 @@ impl Launcher {
             "GitHub",
             Action::Repository,
             false,
+            press,
         );
         if self.login.visible {
             self.list_targets.clear();
@@ -1012,10 +1231,11 @@ impl Launcher {
                 &mut self.targets,
                 &self.catalog.config.name,
                 self.catalog.editing == Some("name"),
+                press,
             );
         }
         if let Some(chooser) = &mut self.chooser {
-            chooser.draw(&mut ui, &mut self.targets);
+            chooser.draw(&mut ui, &mut self.targets, press);
             self.list_targets = chooser.navigation(ui.w);
             self.list_view = Some(chooser.viewport(ui.h));
         }
@@ -1030,8 +1250,7 @@ impl Launcher {
             let height = bottom - top;
             let thumb = (height * height / (height + maximum)).max(20.0).min(height);
             let y = top + (height - thumb) * (scroll / maximum).clamp(0.0, 1.0);
-            ui.rounded(w - 12.0, top, 4.0, height, 2.0, color::BORDER);
-            ui.rounded(w - 12.0, y, 4.0, thumb, 2.0, color::MUTED);
+            mc_ui::scrollbar(&mut ui, w - 14.0, top, height, y, thumb);
         }
         let caret_visible = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1043,18 +1262,32 @@ impl Launcher {
                 "render_scale" => self.catalog.render_scale_text.clone(),
                 _ => format!("Search: {}", self.catalog.query),
             };
-            for ([x, y, w, _], action) in &self.targets {
-                if *action == Action::Field(name)
-                    || (name == "render_scale" && *action == Action::RenderScale)
-                {
-                    let text = ui.fit_text(Face::Medium, 16.0, &value, w - 24.0);
-                    let caret_x = x + 12.0 + ui.measure(Face::Medium, 16.0, &text);
-                    ui.rounded(
-                        caret_x.min(x + w - 10.0),
-                        y + 12.0,
-                        1.0,
+            for ([x, y, w, h], action) in &self.targets {
+                if *action == Action::Field(name) {
+                    // Match the edit box's metrics: Geist 15, 10dp left inset.
+                    let text = ui.fit_text(Face::Regular, 15.0, &value, (w - 20.0).max(8.0));
+                    let caret_x = x + 10.0 + ui.measure(Face::Regular, 15.0, &text);
+                    mc_ui::fill(
+                        &mut ui,
+                        caret_x.min(x + w - 8.0),
+                        y + (h - 18.0) / 2.0,
+                        2.0,
                         18.0,
-                        0.0,
+                        color::TEXT,
+                    );
+                } else if name == "render_scale" && *action == Action::RenderScale {
+                    // While editing, the scale button doubles as the field;
+                    // its centred pixel label decides the caret's place.
+                    let font = button_font([*x, *y, *w, *h]);
+                    let text = ui.fit_text(Face::Pixel, font, &value, (w - 16.0).max(8.0));
+                    let width = ui.measure(Face::Pixel, font, &text);
+                    let caret_x = x + ((w - width) / 2.0).max(8.0) + width + 2.0;
+                    mc_ui::fill(
+                        &mut ui,
+                        caret_x.min(x + w - 8.0),
+                        y + (h - 18.0) / 2.0,
+                        2.0,
+                        18.0,
                         color::TEXT,
                     );
                 }
@@ -1066,50 +1299,19 @@ impl Launcher {
         if let Some(index) = self.focus
             && let Some(([x, y, w, h], _)) = self.targets.get(index)
         {
-            ui.border(*x - 2.0, *y - 2.0, *w + 4.0, *h + 4.0, 2.0, color::TEXT);
+            mc_ui::focus_ring(&mut ui, [*x, *y, *w, *h]);
             self.cursor = (
                 f64::from((x + w / 2.0) * ui.density),
                 f64::from((y + h / 2.0) * ui.density),
             );
         }
-        if self.mouse_down || self.drag.as_ref().is_some_and(|drag| !drag.moved) {
-            let point = [
-                self.cursor.0 as f32 / ui.density,
-                self.cursor.1 as f32 / ui.density,
-            ];
-            if let Some(([x, y, w, h], _)) = self.targets.iter().rev().find(|(rect, _)| {
-                point[0] >= rect[0]
-                    && point[0] <= rect[0] + rect[2]
-                    && point[1] >= rect[1]
-                    && point[1] <= rect[1] + rect[3]
-            }) {
-                ui.rounded(
-                    *x,
-                    *y,
-                    *w,
-                    *h,
-                    2.0,
-                    horizon_client::hud::rgba(255, 255, 255, 48),
-                );
-            }
-        }
-        if !self.mouse_down
-            && self.drag.is_none()
-            && let Some((action, time)) = self.feedback
-            && time.elapsed() < std::time::Duration::from_millis(160)
-            && let Some(([x, y, w, h], _)) = self.targets.iter().find(|(_, a)| *a == action)
-        {
-            ui.rounded(
-                *x,
-                *y,
-                *w,
-                *h,
-                2.0,
-                horizon_client::hud::rgba(255, 255, 255, 48),
-            );
-        }
         crate::documents::draw_ui(&mut ui);
         ui.finish();
+        let opacity = u32::from(self.catalog.config.launcher_opacity.clamp(30, 100));
+        for vertex in &mut b.vertices[ui_opacity_start..] {
+            let alpha = vertex.color >> 24;
+            vertex.color = (vertex.color & 0x00ff_ffff) | ((alpha * opacity / 100) << 24);
+        }
 
         if !r.render(&game::loading_frame(&b))? && !b.patches.is_empty() {
             // A suspended/lost surface skips the frame, including its glyph
@@ -1141,7 +1343,7 @@ impl Launcher {
                 (*x..*x + *w).contains(&p[0]) && (*y..*y + *h).contains(&p[1])
             })
             .map(|(_, a)| *a);
-        if self.catalog.busy() || crate::documents::busy() {
+        if self.catalog.busy() || crate::documents::busy() || crate::wallpapers::busy() {
             return Ok(());
         }
         self.feedback = action.map(|action| (action, std::time::Instant::now()));
@@ -1203,6 +1405,65 @@ impl Launcher {
                 self.catalog.status="Detailed GPU profiling records diagnostics and has overhead. Reports remain on this device.".into();
                 self.catalog.config.save(&self.home)?;
                 crate::device_runtime::configure(self.catalog.config.device);
+            }
+            Some(Action::FpsCap) => {
+                self.catalog.config.fps_uncapped ^= true;
+                self.catalog.config.save(&self.home)?;
+                let game = self.catalog.config.game_home(&self.home);
+                self.catalog.config.apply_frame_rate(&game);
+                self.catalog.status = if self.catalog.config.fps_uncapped {
+                    "Frame rate uncapped: VSync off from the next launch. A 60 Hz screen still shows at most 60 fps."
+                } else {
+                    "VSync on from the next launch: frames pace with the display."
+                }
+                .into();
+            }
+            Some(Action::PerfPreset) => {
+                self.catalog.config.perf_preset = self.catalog.config.perf_preset.next();
+                self.catalog.config.save(&self.home)?;
+                let game = self.catalog.config.game_home(&self.home);
+                self.catalog.config.apply_performance(&game);
+                self.catalog.status = if self.catalog.config.perf_preset
+                    == crate::catalog::PerfPreset::Off
+                {
+                    "Graphics preset off: the game's own Options decide."
+                } else {
+                    "Preset written to the game options. Settings you change in-game stay until a preset is picked here again."
+                }
+                .into();
+            }
+            Some(Action::UiOpacity) => {
+                let current = self.catalog.config.launcher_opacity.clamp(30, 100);
+                let opacity = if current >= 100 {
+                    30
+                } else {
+                    current.saturating_add(10).min(100)
+                };
+                self.catalog.config.launcher_opacity = opacity;
+                self.catalog.config.save(&self.home)?;
+                self.catalog.status = format!(
+                    "Launcher UI opacity set to {opacity}%. The wallpaper stays at full brightness."
+                );
+                self.redraw_now = true;
+            }
+            Some(Action::Wallpaper) => {
+                self.catalog.status = match crate::wallpapers::begin(&self.home) {
+                    Ok(()) => "Choose an animated GIF (max 16 MiB and 48 frames).".into(),
+                    Err(error) => error,
+                };
+            }
+            Some(Action::ClearWallpaper) => {
+                if self.catalog.config.wallpaper_name.is_some() {
+                    crate::wallpapers::remove(&self.home)?;
+                    self.catalog.config.wallpaper_name = None;
+                    self.catalog.config.save(&self.home)?;
+                    self.wallpaper = None;
+                    self.wallpaper_frame = None;
+                    self.redraw_now = true;
+                    self.catalog.status = "Live wallpaper cleared.".into();
+                } else {
+                    self.catalog.status = "No live wallpaper is selected.".into();
+                }
             }
 
             Some(Action::ModSource(origin)) => {

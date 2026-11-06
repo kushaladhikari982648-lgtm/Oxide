@@ -33,6 +33,60 @@ impl RendererMode {
     }
 }
 
+/// The graphics preset the launcher writes into the game's options: the
+/// same bundles the game's own Options > Graphics preset applies
+/// (`horizon_client::graphics::apply_preset`), Sodium-style one-tap tuning
+/// for render distance, particles, shadows, biome blend and chunk updates.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerfPreset {
+    /// The game's own Options decide; the launcher writes nothing.
+    #[default]
+    Off,
+    Performance,
+    Balanced,
+    Quality,
+    Ultra,
+}
+impl PerfPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Game's own settings",
+            Self::Performance => "Performance (low-end)",
+            Self::Balanced => "Balanced",
+            Self::Quality => "Quality",
+            Self::Ultra => "Ultra",
+        }
+    }
+    /// The Settings row cycles through the choices in this order.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Performance,
+            Self::Performance => Self::Balanced,
+            Self::Balanced => Self::Quality,
+            Self::Quality => Self::Ultra,
+            Self::Ultra => Self::Off,
+        }
+    }
+    fn engine(self) -> Option<horizon_client::graphics::Preset> {
+        match self {
+            Self::Off => None,
+            Self::Performance => Some(horizon_client::graphics::Preset::Performance),
+            Self::Balanced => Some(horizon_client::graphics::Preset::Balanced),
+            Self::Quality => Some(horizon_client::graphics::Preset::Quality),
+            Self::Ultra => Some(horizon_client::graphics::Preset::Ultra),
+        }
+    }
+}
+
+/// The `fps_uncapped` default: no artificial frame ceiling on phones.
+fn default_uncapped() -> bool {
+    true
+}
+fn default_launcher_opacity() -> u8 {
+    80
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -42,6 +96,14 @@ pub struct Config {
     pub server: String,
     #[serde(skip)]
     pub microsoft_client_id: String,
+    /// Set when this load applied the low-power-GPU defaults; the launcher
+    /// shows one status note about it. Never serialized.
+    #[serde(skip)]
+    pub low_end_tuned: bool,
+    /// The device ships no Vulkan driver, so the built-in OpenGL ES renderer
+    /// is used regardless of the saved mode. Never serialized.
+    #[serde(skip)]
+    pub no_vulkan: bool,
     pub renderer: RendererMode,
     pub render_scale: crate::display::RenderScale,
     pub orientation: Orientation,
@@ -50,6 +112,20 @@ pub struct Config {
     pub input_host: InputHost,
     pub keypad_controls: bool,
     pub record_performance: bool,
+    /// The frame-rate choice applied to the game at every launch: on, VSync
+    /// is off and the framerate limit lifted (uncapped); off, VSync paces
+    /// frames with the display. Default on: phones cap to their panel rate
+    /// anyway, and players asked for no artificial ceiling.
+    #[serde(default = "default_uncapped")]
+    pub fps_uncapped: bool,
+    /// The graphics preset bundle the launcher writes into the game's
+    /// options; `Off` leaves the game's own choices alone.
+    pub perf_preset: PerfPreset,
+    /// Launcher controls and page veil opacity, independent of the wallpaper.
+    #[serde(default = "default_launcher_opacity")]
+    pub launcher_opacity: u8,
+    /// Original display name for the private looping GIF wallpaper file.
+    pub wallpaper_name: Option<String>,
     #[serde(flatten)]
     pub device: crate::device_preferences::Settings,
     pub shader_source: crate::shader_catalog::Origin,
@@ -103,20 +179,66 @@ impl Config {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         let mut config: Self = serde_json::from_value(value.clone()).unwrap_or_default();
+        config.launcher_opacity = if config.launcher_opacity == 0 {
+            default_launcher_opacity()
+        } else {
+            config.launcher_opacity.clamp(30, 100)
+        };
         if cfg!(target_pointer_width = "32") && value.get("renderer").is_none() {
             config.renderer = RendererMode::OpenGl;
+        }
+        // Devices with no Vulkan driver at all rely on Oxide's built-in
+        // OpenGL ES renderer; PowerVR GE-series boards (Helio A22 class)
+        // have a Vulkan driver that renders but glitches, so they get the
+        // same stable default. Fresh installs only; saved choices win.
+        let no_vulkan = !crate::device_runtime::vulkan_available();
+        config.no_vulkan = no_vulkan;
+        let mut low_end = false;
+        if value.get("renderer").is_none() && (no_vulkan || crate::device_runtime::low_end_gpu())
+        {
+            config.renderer = RendererMode::OpenGl;
+            low_end = true;
+        }
+        let tuned = low_end || no_vulkan;
+        if tuned && value.get("render_scale").is_none() {
+            config.render_scale = crate::display::RenderScale::new(67);
         }
         // Ignore saved app registrations while this dev build uses the fixed ID.
         config.microsoft_client_id =
             crate::account::client_id().unwrap_or_else(|| MICROSOFT_CLIENT_ID.into());
+        // First-run defaults: the Mods page opens on Oxide's own source, so
+        // Copper is front and centre instead of hidden behind a source chip,
+        // and the Shaders page opens on Modrinth, where the Java
+        // (Iris/OptiFine-style) shader packs live. Saved choices win.
+        if value.get("mod_source").is_none() {
+            config.mod_source = crate::shader_catalog::Origin::Oxide;
+        }
+        if value.get("shader_source").is_none() {
+            config.shader_source = crate::shader_catalog::Origin::Modrinth;
+        }
         if value.get("renderer").is_none() && value["gpu_batching"].as_bool() == Some(true) {
             config.renderer = RendererMode::Vulkan;
         }
+        config.low_end_tuned = low_end && config.renderer == RendererMode::OpenGl;
         let legacy = std::fs::read(config.game_home(home).join("horizon-touch.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .unwrap_or_default();
         config.device.migrate_missing(&value, &legacy);
+        // Weak-GPU defaults: cap the panel refresh request at 60 Hz (a 90 or
+        // 120 Hz panel otherwise doubles the frame budget of a GE8300) and
+        // let ADPF performance hints boost the game thread. Applied only
+        // while the player has saved neither choice.
+        if tuned {
+            if value.get("display_hz").is_none() && legacy.get("display_hz").is_none() {
+                config.device.display_hz = 60;
+            }
+            if value.get("performance_hints").is_none()
+                && legacy.get("performance_hints").is_none()
+            {
+                config.device.performance_hints = true;
+            }
+        }
         config
     }
     pub fn save(&self, home: &Path) -> Result<(), String> {
@@ -127,6 +249,38 @@ impl Config {
         )
         .map_err(|e| e.to_string())?;
         std::fs::rename(part, home.join("android-launcher.json")).map_err(|e| e.to_string())
+    }
+    /// Writes the frame-rate choice into the game's `options.txt` at launch:
+    /// uncapped turns VSync off and sets vanilla's unlimited frame rate
+    /// (260); capped restores VSync and the 120 fps ceiling.
+    pub fn apply_frame_rate(&self, game: &Path) {
+        let path = game.join("options.txt");
+        let (vsync, max) = if self.fps_uncapped {
+            ("false", "260")
+        } else {
+            ("true", "120")
+        };
+        let settings = horizon_client::settings::Settings::load(&path);
+        if let Ok(settings) = settings
+            .with_option("enableVsync", vsync)
+            .and_then(|s| s.with_option("maxFps", max))
+        {
+            settings.save(&path);
+        }
+    }
+    /// Writes the chosen graphics preset into the game's options: the same
+    /// bundle the game's own Options applies (render and simulation
+    /// distance, clouds, particles, entity shadows and distance, biome
+    /// blend, mipmaps, leaf style, weather radius and Horizon's chunk
+    /// update tuning). `Off` writes nothing.
+    pub fn apply_performance(&self, game: &Path) {
+        let Some(preset) = self.perf_preset.engine() else {
+            return;
+        };
+        let path = game.join("options.txt");
+        let mut settings = horizon_client::settings::Settings::load(&path);
+        horizon_client::graphics::apply_preset(preset, &mut settings);
+        settings.save(&path);
     }
     pub fn profile_home(&self, home: &Path) -> PathBuf {
         if self.profile == 0 {
@@ -193,6 +347,9 @@ pub struct Catalog {
     pub config: Config,
     pub editing: Option<&'static str>,
     pub render_scale_text: String,
+    /// Copper is installed and switched on (`horizon-mods.txt`): the Play
+    /// page says so, and launching turns the native suite on.
+    pub copper_on: bool,
     worker: Option<mpsc::Receiver<Result<Reply, String>>>,
     search_worker: Option<mpsc::Receiver<Result<Vec<Project>, String>>>,
     searches: crate::search_queue::Queue<(Page, browser::SourceId, String, usize), Vec<Project>>,
@@ -203,8 +360,238 @@ pub struct LocalItem {
     pub file: String,
     pub title: String,
     pub enabled: bool,
+    /// Set for Java mod JARs (Fabric/Forge/Quilt/NeoForge) found in the mods
+    /// folder: a loader+name summary. Oxide is a Rust client, so these are
+    /// listed for explanation and removal, never loaded.
+    pub java: Option<String>,
+}
+
+/// Summarises a Java mod JAR so the launcher can list it and explain why it
+/// cannot run: the loader flavour plus the name/version from its metadata.
+fn java_mod_summary(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > 64 << 20 {
+        return None;
+    }
+    let mut zip = zip::ZipArchive::new(file).ok()?;
+    let mut meta: Option<(&'static str, String)> = None;
+    for (loader, entry) in [
+        ("Fabric", "fabric.mod.json"),
+        ("Quilt", "quilt.mod.json"),
+        ("NeoForge", "META-INF/neoforge.mods.toml"),
+        ("Forge", "META-INF/mods.toml"),
+        ("Forge", "mcmod.info"),
+    ] {
+        if let Ok(entry) = zip.by_name(entry) {
+            let mut raw = Vec::new();
+            if entry.take(256 * 1024).read_to_end(&mut raw).is_ok() {
+                meta = Some((loader, String::from_utf8_lossy(&raw).into_owned()));
+                break;
+            }
+        }
+    }
+    let (loader, text) = meta?;
+    let (name, version) = if matches!(loader, "Forge" | "NeoForge")
+        && !text.trim_start().starts_with('[')
+    {
+        (toml_field(&text, "displayName"), toml_field(&text, "version"))
+    } else {
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let field = |key: &str| {
+            value
+                .get(key)
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    value
+                        .pointer(&format!("/quilt_loader/metadata/{key}"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| {
+                    value
+                        .pointer(&format!("/quilt_loader/{key}"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| value.get(0).and_then(|v| v.get(key)).and_then(|v| v.as_str()))
+                .map(str::to_owned)
+        };
+        (field("name"), field("version"))
+    };
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = name.filter(|n| !n.is_empty()).unwrap_or(stem);
+    let mut summary = format!("{loader} mod: {name}");
+    if let Some(version) = version.filter(|v| !v.is_empty() && v.len() <= 40) {
+        summary.push(' ');
+        summary.push_str(&version);
+    }
+    Some(summary)
+}
+
+/// Reads a `key = "value"` line from a Forge/NeoForge mods.toml.
+fn toml_field(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix(key) {
+            if let Some(rest) = rest.trim_start().strip_prefix('=') {
+                let value = rest.trim().trim_matches(['"', '\'']);
+                if !value.is_empty() {
+                    return Some(value.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Release assets of Oxide's first-party mods (Copper, the mobile
+/// performance suite): an index plus the validated `.hmod` packages.
+const OXIDE_RELEASE_BASE: &str =
+    "https://raw.githubusercontent.com/kushaladhikari982648-lgtm/Oxide/copper-v1/";
+
+/// The manifest of the hosted `copper.hmod`, byte for byte. The package is
+/// a zip of this one file, so the app can rebuild it on the device and
+/// Copper installs even with no network at all.
+const COPPER_MANIFEST: &str = "id = \"copper\"\nname = \"Copper\"\nversion = \"1.0.0\"\ndescription = \"Oxide's mobile performance suite: caps in-flight chunk generation so close chunks land first, leaves the render thread an extra core on phones, and skips the occlusion-culling passes that tiled phone GPUs pay more for than they save. The suite is native to the client; this package is the toggle that turns it on.\"\nauthors = [\"Oxide\"]\napi = \"0.2\"\n";
+
+/// Repacks [`COPPER_MANIFEST`] into the same `.hmod` zip the release hosts.
+fn bundled_copper_hmod() -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut out);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("horizon-mod.toml", options)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(COPPER_MANIFEST.as_bytes())
+            .map_err(|e| e.to_string())?;
+        zip.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(out.into_inner())
+}
+
+/// The Oxide source's catalogue: first-party mods from this repository's
+/// release assets. The download URL rides in `Project::icon` because these
+/// mods have no shared browser source to resolve files through.
+fn oxide_search(text: &str, offset: usize) -> Result<Vec<Project>, String> {
+    use std::io::Read;
+    // The built-in catalogue: Copper stays listed and installable even when
+    // the index fetch fails (offline, DNS, proxy), because the download URL
+    // is a constant release asset.
+    let bundled = serde_json::json!([{
+        "id": "copper",
+        "name": "Copper",
+        "summary": "Mobile performance suite: paces chunk streaming, gives the render thread an extra core, skips occlusion passes on tiled phone GPUs.",
+        "version": "1.0.0",
+        "file": "copper.hmod",
+        "page": "https://github.com/kushaladhikari982648-lgtm/Oxide/tree/copper-v1",
+        "author": "Oxide",
+        "downloads": 0
+    }]);
+    let fetched = (|| {
+        let mut raw = Vec::new();
+        ureq::AgentBuilder::new()
+            .https_only(true)
+            .timeout_connect(std::time::Duration::from_secs(10))
+            .timeout_read(std::time::Duration::from_secs(30))
+            .build()
+            .get(&format!("{OXIDE_RELEASE_BASE}index.json"))
+            .call()
+            .map_err(|e| e.to_string())?
+            .into_reader()
+            .take(1024 * 1024)
+            .read_to_end(&mut raw)
+            .map_err(|e| e.to_string())?;
+        serde_json::from_slice::<serde_json::Value>(&raw).map_err(|e| e.to_string())
+    })();
+    let map = |value: &serde_json::Value| -> Vec<Project> {
+        value
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let text = |key: &str| entry.get(key).and_then(|v| v.as_str());
+                        let file = text("file")?;
+                        let id = text("id")?;
+                        Some(Project {
+                            source: browser::SourceId::Horizon,
+                            id: id.to_owned(),
+                            slug: id.to_owned(),
+                            title: text("name")?.to_owned(),
+                            summary: text("summary").unwrap_or_default().to_owned(),
+                            author: text("author").unwrap_or("Oxide").to_owned(),
+                            downloads: entry.get("downloads").and_then(|v| v.as_u64()).unwrap_or(0),
+                            page: text("page").unwrap_or_default().to_owned(),
+                            icon: Some(format!("{OXIDE_RELEASE_BASE}{file}")),
+                            license: "MIT".into(),
+                            kind: Kind::Mod,
+                            game_versions: vec![browser::GAME.into()],
+                            loaders: vec!["horizon".into()],
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut all = map(&fetched.unwrap_or_else(|_| bundled.clone()));
+    if all.is_empty() {
+        // A broken or empty index must never hide the first-party mods.
+        all = map(&bundled);
+    }
+    let needle = text.trim().to_lowercase();
+    if !needle.is_empty() {
+        all.retain(|project| {
+            project.title.to_lowercase().contains(&needle)
+                || project.summary.to_lowercase().contains(&needle)
+        });
+    }
+    Ok(all.into_iter().skip(offset).take(12).collect())
+}
+
+/// Explains, for a Java mod found on a mod source, that Oxide cannot run it
+/// and what the native equivalent of the popular ones is.
+fn java_mod_status(project: &browser::Project) -> String {
+    let loader = project
+        .loaders
+        .iter()
+        .find(|l| {
+            matches!(
+                l.as_str(),
+                "fabric" | "forge" | "quilt" | "neoforge" | "liteloader"
+            )
+        })
+        .map(String::as_str)
+        .unwrap_or("Java");
+    let slug = project.slug.to_ascii_lowercase();
+    let equivalent = if slug.contains("sodium")
+        || slug.contains("rubidium")
+        || slug.contains("embeddium")
+        || slug.contains("magnesium")
+    {
+        "Oxide's renderer is already native Rust; tune Client resolution and Rendering in Settings for performance."
+    } else if slug.contains("lithium") || slug.contains("pheromone") || slug.contains("krypton") {
+        "Oxide's game loop and networking are native Rust rewrites; no optimizer mod is needed."
+    } else if slug.contains("iris") || slug.contains("optifine") || slug.contains("oculus") {
+        "For shader packs use the Shaders page: Horizon .hshader packs and experimental shader ZIPs."
+    } else if slug.contains("starlight") || slug.contains("phosphor") {
+        "Oxide's lighting engine is a native Rust rewrite; no mod is needed."
+    } else {
+        "Browse the Horizon source on the Mods page for sandboxed .hmod mods, or see docs/mods.md to build one."
+    };
+    format!(
+        "{} is a {loader} (Java) mod: Oxide is a Rust client and cannot run Java bytecode. {equivalent}",
+        project.title
+    )
 }
 impl Catalog {
+    /// Anything the launcher paints as movement: a running download, search
+    /// or their workers. The idle redraw pacing keeps 10 Hz while this is true.
+    pub fn animating(&self) -> bool {
+        self.downloading.is_some() || self.worker.is_some() || self.search_worker.is_some()
+    }
     pub fn new(home: &Path) -> Self {
         let config = Config::load(home);
         let mut result = Self {
@@ -224,6 +611,7 @@ impl Catalog {
             config,
             editing: None,
             render_scale_text: String::new(),
+            copper_on: false,
             worker: None,
             search_worker: None,
             searches: crate::search_queue::Queue::new(),
@@ -254,6 +642,7 @@ impl Catalog {
             .map(|e| (e.source, e.project.clone()))
             .collect();
         let on = horizon_client::mod_list::ModList::load(&game);
+        self.copper_on = on.enabled.contains("copper");
         let settings = horizon_client::settings::Settings::load(&game.join("options.txt"));
         self.local.clear();
         for kind in horizon_client::content_files::Kind::ALL {
@@ -266,7 +655,19 @@ impl Catalog {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if !horizon_client::content_files::plain_name(&name) || !kind.accepts(&name) {
+                if !horizon_client::content_files::plain_name(&name) {
+                    continue;
+                }
+                // Java mod JARs are listed (never loaded) so players get an
+                // explanation instead of a mod that silently does nothing.
+                let java = if kind == horizon_client::content_files::Kind::Mods
+                    && name.to_ascii_lowercase().ends_with(".jar")
+                {
+                    java_mod_summary(&entry.path())
+                } else {
+                    None
+                };
+                if java.is_none() && !kind.accepts(&name) {
                     continue;
                 }
                 let enabled = match kind {
@@ -285,6 +686,7 @@ impl Catalog {
                     file: name.clone(),
                     title: name,
                     enabled,
+                    java,
                 });
             }
         }
@@ -475,6 +877,9 @@ impl Catalog {
             {
                 query.everything = true;
                 browser::modrinth::Modrinth.search(&query)
+            } else if page == Page::Mods && source == browser::SourceId::CurseForge {
+                // The Oxide source sentinel: first-party mods, own index.
+                oxide_search(&text, offset)
             } else {
                 browser::horizon::Registry.search(&query)
             };
@@ -501,6 +906,56 @@ impl Catalog {
             let _=std::fs::remove_file(stage);result
         });
     }
+    /// Downloads a first-party Oxide mod (Copper) over HTTPS and validates
+    /// it exactly like an imported `.hmod` before it replaces an old copy.
+    fn oxide_install(&mut self, home: &Path, url: String) {
+        let game = self.config.game_home(home);
+        self.job("Downloading Oxide mod over HTTPS...", move || {
+            use std::io::Read;
+            let fetch = (|| -> Result<Vec<u8>, String> {
+                let mut bytes = Vec::new();
+                ureq::AgentBuilder::new().https_only(true).timeout_connect(std::time::Duration::from_secs(20)).timeout_read(std::time::Duration::from_secs(90)).build().get(&url).call().map_err(|e|e.to_string())?.into_reader().take(32*1024*1024+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+                if bytes.len() > 32 * 1024 * 1024 {
+                    return Err("Oxide mod exceeds 32 MiB".into());
+                }
+                Ok(bytes)
+            })();
+            // Offline fallback: the Copper package rides inside the app, so
+            // it installs and enables even with no network at all. Other
+            // Oxide mods must download.
+            let bytes = match fetch {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    if !url.ends_with("copper.hmod") {
+                        return Err(e);
+                    }
+                    bundled_copper_hmod()?
+                }
+            };
+            let dir = game.join("horizon-mods");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let stage = dir.join("import.partial");
+            std::fs::write(&stage, bytes).map_err(|e| e.to_string())?;
+            let result = (|| {
+                let package = horizon_mods::Package::read(&stage)?;
+                let destination = dir.join(format!("{}.hmod", package.manifest.id));
+                if destination.exists() {
+                    std::fs::copy(&destination, destination.with_extension("hmod.previous"))
+                        .map_err(|e| e.to_string())?;
+                }
+                std::fs::rename(&stage, destination).map_err(|e| e.to_string())?;
+                Ok(Reply::Done(
+                    format!(
+                        "Installed {}. Enable it in Installed, then Play: Copper paces chunk streaming from the next world load.",
+                        package.manifest.name
+                    ),
+                    horizon_client::content_files::Kind::Mods,
+                ))
+            })();
+            let _ = std::fs::remove_file(stage);
+            result
+        });
+    }
     pub fn install(&mut self, home: &Path, index: usize) {
         let Some(project) = self.results.get(index).cloned() else {
             return;
@@ -509,7 +964,21 @@ impl Catalog {
             self.status = "This .hnmod needs a separately compiled client. Android support is planned; sandboxed .hmod mods can be installed now.".into();
             return;
         }
+        if project.kind == Kind::Mod && project.source != browser::SourceId::Horizon {
+            self.status = java_mod_status(&project);
+            return;
+        }
         if self.busy() || self.download_label(&project).is_some() {
+            return;
+        }
+        // First-party Oxide mods (Copper): a direct HTTPS .hmod from this
+        // repository's release assets, validated like an imported one.
+        if let Some(url) = project
+            .icon
+            .clone()
+            .filter(|icon| icon.starts_with(OXIDE_RELEASE_BASE))
+        {
+            self.oxide_install(home, url);
             return;
         }
         let game = self.config.game_home(home);
@@ -519,8 +988,7 @@ impl Catalog {
                     project.source,
                     browser::SourceId::Horizon | browser::SourceId::Modrinth
                 ))
-            && !(cfg!(target_pointer_width = "64")
-                && project.kind == Kind::Mod
+            && !(project.kind == Kind::Mod
                 && project.source == browser::SourceId::Horizon)
         {
             return;
@@ -568,15 +1036,19 @@ impl Catalog {
         let Some(item) = self.local.get(index).cloned() else {
             return;
         };
+        if let Some(summary) = &item.java {
+            self.status = format!("{summary}: Java mods cannot run in Oxide, a Rust client. Delete it here; docs/mods.md lists the native equivalents.");
+            return;
+        }
         let game = self.config.game_home(home);
         let path = game.join("options.txt");
         let mut settings = horizon_client::settings::Settings::load(&path);
         match item.kind {
             horizon_client::content_files::Kind::Mods => {
-                if !cfg!(target_pointer_width = "64") {
-                    self.status = "Sandboxed code mods require a 64-bit APK".into();
-                    return;
-                }
+                // No bit-width gate: Android builds never link the mod
+                // runtime, so sandboxed code mods are inert here on both
+                // ABIs while content mods (Copper included) load in every
+                // build. Toggling is the player's choice on any device.
                 let mut on = horizon_client::mod_list::ModList::load(&game);
                 if let Some(id) = item.file.strip_suffix(".hmod") {
                     if item.enabled {

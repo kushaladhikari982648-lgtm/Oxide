@@ -614,6 +614,18 @@ impl Graphics {
             // Preserve the Android fork's render/server headroom until phone profiling.
             .saturating_sub(if cfg!(target_os = "android") { 2 } else { 1 })
             .max(1);
+        // Copper leaves the phone one more core: with fewer builders in
+        // flight, close columns still finish first and the render thread
+        // and the GPU driver keep a core to themselves while chunks stream.
+        // Never below two builders, though: on a four-core board (Helio A22
+        // class) `auto` is already 2, and halving it would make chunk
+        // generation crawl — slower than without the mod.
+        let auto = if cfg!(target_os = "android") && crate::android_runtime::copper() && auto >= 3
+        {
+            auto - 1
+        } else {
+            auto
+        };
         if self.battery { auto.div_ceil(2) } else { auto }
     }
     /// The frame cap battery mode adds: 60 in a world, 30 in menus without a
