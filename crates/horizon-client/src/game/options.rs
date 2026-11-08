@@ -379,7 +379,7 @@ impl Game<'_> {
     /// The `ditherCutoutMips` toggle changed: the atlas's cutout sprites are
     /// dithered at their next load, so the resource reload rebuilds them.
     pub(super) fn sync_dither_cutouts(&mut self) {
-        if horizon_client_render::mipmap::set_dither_cutouts(
+        if horizon_client::mipmap::set_dither_cutouts(
             self.settings.horizon.dither_cutout_mips,
         ) {
             self.reload_packs();
