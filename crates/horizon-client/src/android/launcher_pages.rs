@@ -109,10 +109,14 @@ fn button_font(rect: [f32; 4]) -> f32 {
 const NAV_HEIGHT: f32 = 52.0;
 /// The strip above the bar holding the Play button and the opacity slider.
 const DOCK_HEIGHT: f32 = 64.0;
-/// The launcher content ends this far above the bottom edge, clear of the dock
-/// and the navigation bar.
+/// The status strip's height above the dock: the status text and the repository
+/// link on one line, with the rule under them. Page content stops above it, so
+/// a page's own buttons can never be covered by the footer or steal its taps.
+const STATUS_STRIP: f32 = 32.0;
+/// The launcher content ends this far above the bottom edge, clear of the dock,
+/// the status strip and the navigation bar.
 fn content_bottom(h: f32) -> f32 {
-    h - NAV_HEIGHT - DOCK_HEIGHT - 8.0
+    dock_top(h) - STATUS_STRIP
 }
 
 /// Where the bottom navigation bar starts, and the dock above it.
@@ -1308,7 +1312,9 @@ impl Launcher {
         };
         let status_line: String = status.lines().next().unwrap_or_default().to_owned();
         if !status_line.is_empty() {
-            let fitted = ui.fit_text(Face::Regular, 13.0, &status_line, (w - 64.0).max(40.0));
+            // Leave the GitHub link's box (72 dp plus margins) unclaimed.
+            let fitted =
+                ui.fit_text(Face::Regular, 13.0, &status_line, (w - 144.0).max(40.0));
             ui.text(
                 Face::Regular,
                 13.0,
@@ -1318,12 +1324,13 @@ impl Launcher {
                 &fitted,
             );
         }
-        // The repository link rides at the right end of the status strip, out of
-        // the dock's way.
+        // The repository link rides at the far right of the status strip, level
+        // with the status text rather than in a row of its own: there it clears
+        // the dock, the pages' bottom buttons and the rule below it.
         button(
             &mut ui,
             &mut self.targets,
-            [w - 116.0, dock_top(h) - 52.0, 96.0, 26.0],
+            [w - 32.0 - 72.0, dock_top(h) - 22.0, 72.0, 20.0],
             "GitHub",
             Action::Repository,
             false,
@@ -2005,9 +2012,15 @@ mod tests {
                 assert!(tab[1] + tab[3] <= h);
                 assert!(tab[0] >= 0.0 && tab[0] + tab[2] <= w);
             }
-            // Content ends above the dock, with the status strip in between.
-            assert_eq!(content_bottom(h), h - NAV_HEIGHT - DOCK_HEIGHT - 8.0);
-            assert!(content_bottom(h) < dock_top(h));
+            // Content ends above the dock, with the status strip in between:
+            // a page's bottom row (anchored at `content_bottom - 52`, 42 high)
+            // must not reach the footer's repository link.
+            assert_eq!(content_bottom(h), dock_top(h) - STATUS_STRIP);
+            let page_bottom = content_bottom(h) - 10.0;
+            assert!(
+                page_bottom <= dock_top(h) - 22.0,
+                "page content clears the footer's link at {w}x{h}"
+            );
         }
     }
 

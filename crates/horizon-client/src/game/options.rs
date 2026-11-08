@@ -376,8 +376,18 @@ impl Game<'_> {
             self.settings.video_modes = modes;
         }
     }
+    /// The `ditherCutoutMips` toggle changed: the atlas's cutout sprites are
+    /// dithered at their next load, so the resource reload rebuilds them.
+    pub(super) fn sync_dither_cutouts(&mut self) {
+        if horizon_client_render::mipmap::set_dither_cutouts(
+            self.settings.horizon.dither_cutout_mips,
+        ) {
+            self.reload_packs();
+        }
+    }
     /// Settings that Horizon applies beyond render distance, volume and GUI scale.
     pub(super) fn apply_ui_settings(&mut self) {
+        self.sync_dither_cutouts();
         self.apply_fullscreen();
         let s = &self.settings;
         if let Some(r) = self.renderer.as_mut() {

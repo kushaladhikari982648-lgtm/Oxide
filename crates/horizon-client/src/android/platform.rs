@@ -292,8 +292,12 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
     })
 }
 
+/// This project's own repository: the launcher's GitHub button opens the build
+/// the player is running, not the fork it descends from.
+pub const REPOSITORY: &str = "https://github.com/kushaladhikari982648-lgtm/Oxide";
+
 pub fn open_repository() -> bool {
-    open_url("https://github.com/Vasysik/horizon-android")
+    open_url(REPOSITORY)
 }
 /// Browse our SAF directory through the system file manager, never a private path.
 pub fn open_documents(id: &str) -> bool {

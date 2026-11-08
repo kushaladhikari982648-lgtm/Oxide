@@ -18695,6 +18695,8 @@ pub(crate) fn android_game() -> Result<Box<dyn ApplicationHandler>> {
     }
     horizon_client::spans::enable(options.spikes.is_some());
     let settings = Settings::load(&std::env::current_dir()?.join("options.txt"));
+    // Before any texture is built: the atlas's cutout mips read this once per sprite.
+    horizon_client_render::mipmap::set_dither_cutouts(settings.horizon.dither_cutout_mips);
     let root = options.resources.clone();
     horizon_threads::put_helpers_behind();
     Behaviours::set_cache_dir(std::env::current_dir()?.join(".horizon-cache"));

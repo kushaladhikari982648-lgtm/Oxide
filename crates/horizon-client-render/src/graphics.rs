@@ -366,6 +366,10 @@ pub struct Graphics {
     pub fog: bool,
     pub weather: bool,
     pub animated_textures: bool,
+    /// Dither a high-resolution cutout texture's small mip levels so thin detail
+    /// (grass, leaves, flowers, kelp) keeps its coverage instead of eroding into
+    /// gaps at distance. Off draws the raw averaged levels.
+    pub dither_cutout_mips: bool,
     pub present_mode: PresentMode,
     pub pacing: Pacing,
     /// Chunk worker threads; 0 uses every core but one. Applies at the next start.
@@ -437,6 +441,9 @@ impl Default for Graphics {
             battery: false,
             api: GraphicsApi::Auto,
             shader_pack: String::new(),
+            // On: thin cutout detail (grass, leaves, flowers) otherwise erodes
+            // into gaps at distance, which reads as see-through ground and foliage.
+            dither_cutout_mips: true,
         }
     }
 }
@@ -482,6 +489,7 @@ impl Graphics {
                 "fog" => g.fog = flag(g.fog),
                 "weather" => g.weather = flag(g.weather),
                 "animatedTextures" => g.animated_textures = flag(g.animated_textures),
+                "ditherCutoutMips" => g.dither_cutout_mips = flag(g.dither_cutout_mips),
                 "presentMode" => g.present_mode = PresentMode::parse(value),
                 "framePacing" => {
                     g.pacing = if value == "precise" {
@@ -530,7 +538,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -542,6 +550,7 @@ impl Graphics {
             bool_text(self.fog),
             bool_text(self.weather),
             bool_text(self.animated_textures),
+            bool_text(self.dither_cutout_mips),
             self.present_mode.name(),
             match self.pacing {
                 Pacing::Efficient => "efficient",
@@ -706,6 +715,7 @@ mod tests {
             fog: false,
             weather: false,
             animated_textures: false,
+            dither_cutout_mips: false,
             present_mode: PresentMode::Mailbox,
             pacing: Pacing::Precise,
             workers: 6,
