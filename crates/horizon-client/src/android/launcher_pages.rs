@@ -1060,15 +1060,17 @@ impl Launcher {
                 "Launch settings",
             );
             let row_height = if compact { 82.0 } else { 66.0 };
-            self.catalog.scroll = self
-                .catalog
-                .scroll
-                .clamp(0.0, (20.0 * row_height - (content_bottom(h) - 195.0)).max(0.0));
-            self.list_view = Some([
-                195.0,
-                content_bottom(h),
-                (20.0 * row_height - (content_bottom(h) - 195.0)).max(0.0),
-            ]);
+            // The strip between the title and the status footer the rows live in.
+            const LIST_TOP: f32 = 195.0;
+            let list_bottom = content_bottom(h);
+            // The whole list's height, the same expression the rows are laid out
+            // with below: a row's extent is `row_height`, but on compact screens
+            // its drawn contents and divider run to `row_height + 16`.
+            let row_extent = row_height + if compact { 16.0 } else { 0.0 };
+            let list_height = 20.0 * row_extent;
+            let maximum = (list_height - (list_bottom - LIST_TOP)).max(0.0);
+            self.catalog.scroll = self.catalog.scroll.clamp(0.0, maximum);
+            self.list_view = Some([LIST_TOP, list_bottom, maximum]);
             let wallpaper_label = c
                 .wallpaper_name
                 .as_deref()
@@ -1204,7 +1206,11 @@ impl Launcher {
             .into_iter()
             .enumerate()
             {
-                let y = 195.0 + i as f32 * row_height - self.catalog.scroll;
+                let y = LIST_TOP + i as f32 * row_height - self.catalog.scroll;
+                // Wholly outside the list: it draws nothing and takes no tap.
+                if y + row_extent < LIST_TOP || y > list_bottom {
+                    continue;
+                }
                 self.list_targets.push((
                     [
                         if compact { 32.0 } else { w * 0.36 },
@@ -1214,9 +1220,11 @@ impl Launcher {
                     ],
                     action,
                 ));
-                if y < 185.0 || y + if compact { 70.0 } else { 46.0 } > content_bottom(h) {
-                    continue;
-                }
+                // A row straddling either edge is cut to the list, like the
+                // game's own scrolling screens (options_ui's `clip_since`):
+                // nothing of it spills over the title above or the footer below.
+                let row_start = ui.batch.vertices.len();
+                let target_start = self.targets.len();
                 ui.text(
                     Face::Regular,
                     16.0,
@@ -1282,7 +1290,34 @@ impl Launcher {
                     );
                 }
                 mc_ui::divider(&mut ui, 32.0, y + if compact { 78.0 } else { 62.0 }, w - 64.0);
+                if y < LIST_TOP || y + row_extent > list_bottom {
+                    // Cut the row to the list, and give it back only the taps on
+                    // the part still shown: the rest would otherwise answer from
+                    // under the title or the footer, where nothing is drawn.
+                    let scale = ui.density / ui.batch.scale;
+                    ui.batch.clip_since(
+                        row_start,
+                        0.0,
+                        LIST_TOP * scale,
+                        w * scale,
+                        list_bottom * scale,
+                    );
+                    let widget = [
+                        if compact { 32.0 } else { w * 0.36 },
+                        y + if compact { 24.0 } else { 0.0 },
+                        if compact { w - 64.0 } else { w * 0.64 - 32.0 },
+                        46.0,
+                    ];
+                    let top = widget[1].max(LIST_TOP);
+                    let end = (widget[1] + widget[3]).min(list_bottom);
+                    self.targets.truncate(target_start);
+                    if end > top {
+                        self.targets.push(([widget[0], top, widget[2], end - top], action));
+                    }
+                }
             }
+            // The footer's buttons are not list rows: they are drawn after the
+            // rows and must not be cut by the list's clip.
             button(
                 &mut ui,
                 &mut self.targets,

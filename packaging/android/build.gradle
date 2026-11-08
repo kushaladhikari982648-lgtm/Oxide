@@ -4,11 +4,11 @@ android {
     namespace 'dev.horizon.android'
     compileSdk 35
     defaultConfig {
-        applicationId providers.gradleProperty('appId').getOrElse('dev.horizon.android')
+        applicationId providers.gradleProperty('appId').getOrElse('re.al.oxidelauncher')
         minSdk providers.gradleProperty('minSdk').getOrElse('28').toInteger()
         targetSdk 35
-        versionCode 43
-        versionName '0.7.8'
+        versionCode 44
+        versionName '0.7.9'
         ndk { abiFilters providers.gradleProperty('abi').get() }
     }
     signingConfigs {
