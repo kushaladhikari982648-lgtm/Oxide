@@ -1,5 +1,62 @@
 use super::*;
 
+/// The leaf rule needs no prepared resources: only the `leaves` class.
+fn leaf_state(leaves: bool) -> Info {
+    let mut info = zeroed_info();
+    info.leaves = leaves;
+    info
+}
+
+fn zeroed_info() -> Info {
+    Info {
+        solid: false,
+        full: false,
+        permeable: true,
+        shade: 1.0,
+        emission: 0,
+        tier: 0,
+        emissive: false,
+        fluid: FluidState::EMPTY,
+        model: true,
+        block_entity: false,
+        tints: [Tint::None; 2],
+        tint_count: 0,
+        offset: None,
+        legacy_solid: false,
+        overlay: false,
+        leaves: false,
+        blocks_flow: false,
+        ice: false,
+        sturdy: 0,
+        face: [0; 6],
+        cover: [0.0; 6],
+    }
+}
+
+/// Vanilla draws the faces inside a canopy; the option is what removes them.
+#[test]
+fn the_leaf_cull_only_skips_leaf_to_leaf_faces_and_only_when_asked() {
+    let leaf = leaf_state(true);
+    let stone = leaf_state(false);
+    // Faces between two leaf blocks: vanilla's own solid-leaf rule at
+    // `cutoutLeaves: false`, nothing at all while the leaves are see-through.
+    assert!(skips_leaf_faces(false, false, &leaf, &leaf));
+    assert!(!skips_leaf_faces(true, false, &leaf, &leaf));
+    // The option removes them with see-through leaves too, and changes
+    // nothing for the solid-leaf case it already covered.
+    assert!(skips_leaf_faces(true, true, &leaf, &leaf));
+    assert!(skips_leaf_faces(false, true, &leaf, &leaf));
+    // A leaf beside anything that is not a leaf keeps its face, whichever way
+    // the option is set: this is what stops a tree's outer shell vanishing.
+    for cutout in [false, true] {
+        for cull in [false, true] {
+            assert!(!skips_leaf_faces(cutout, cull, &leaf, &stone));
+            assert!(!skips_leaf_faces(cutout, cull, &stone, &leaf));
+            assert!(!skips_leaf_faces(cutout, cull, &stone, &stone));
+        }
+    }
+}
+
 #[test]
 fn padded_reuse_resets_missing_neighbors_and_matches_chunk_reads_across_layouts() {
     let mut pad = Padded::default();
@@ -105,6 +162,7 @@ fn reused_mesh_matches_fresh_geometry_across_sections_and_resource_reload() {
             blend_radius: 2,
             smooth_lighting: reload == 0,
             cutout_leaves: reload == 0,
+            leaf_cull: false,
         };
         for (case, (center, east)) in [
             (&empty, None),

@@ -961,6 +961,22 @@ pub struct Mesher<'a> {
     pub smooth_lighting: bool,
     /// The `cutoutLeaves` option (fancy graphics); off makes leaves opaque.
     pub cutout_leaves: bool,
+    /// Horizon's `leafCull` option: skip the faces between two leaf blocks.
+    ///
+    /// Vanilla draws them: `shouldRenderFace` only culls against a full opaque
+    /// neighbour, so a canopy is a hollow shell of quads and you see the far
+    /// side's quads through the near side's cut-out texels, at every leaf
+    /// block in every tree. Dropping them takes the inner faces out of a
+    /// forest and leaves each canopy's outer shell — but the gaps you used to
+    /// see the far wall through now show what is behind the tree instead.
+    /// Off by default, and it has no effect with `cutoutLeaves` off, where the
+    /// faces between solid leaves are already skipped.
+    ///
+    /// Vanilla's own `skipRendering: leaves` covers only the blocks that opt
+    /// into it (oak-family and mangrove leaves; cherry and azalea do not), so
+    /// this applies to every leaf-classed block alike rather than inventing a
+    /// per-block exception the engine has no exported fact for.
+    pub leaf_cull: bool,
 }
 impl Mesher<'_> {
     /// `region[dz][dx]` are the chunks around the meshed column (centre 1,1).
@@ -1054,9 +1070,8 @@ impl Mesher<'_> {
                         let [dx, dy, dz] = d.normal();
                         let neighbor = pad.blocks[pi(x + dx, y + dy, z + dz)];
                         let other = &info[neighbor as usize];
-                        // LeavesBlock.skipRendering with opaque leaves.
-                        let opaque_leaves = !self.cutout_leaves && state.leaves && other.leaves;
-                        visible[d as usize] = !opaque_leaves
+                        visible[d as usize] =
+                            !skips_leaf_faces(self.cutout_leaves, self.leaf_cull, state, other)
                             && self
                                 .visibility
                                 .should_render_face(
@@ -1165,6 +1180,15 @@ impl Mesher<'_> {
             ));
         }
     }
+}
+/// Whether the face between `state` and `other` is skipped as a leaf-to-leaf
+/// face: vanilla's `LeavesBlock.skipRendering` with opaque leaves, or
+/// Horizon's `leafCull` option with see-through ones.
+///
+/// Takes the two `Info`s rather than a mesher so the rule is testable without
+/// prepared resources: which class a block is (`leaves`) and nothing else.
+fn skips_leaf_faces(cutout_leaves: bool, leaf_cull: bool, state: &Info, other: &Info) -> bool {
+    state.leaves && other.leaves && (!cutout_leaves || leaf_cull)
 }
 /// Snapshot of the 3x3 chunk neighbourhood used by a worker job.
 pub type Region = [[Option<Arc<Chunk>>; 3]; 3];

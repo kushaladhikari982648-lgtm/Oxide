@@ -358,6 +358,17 @@ pub struct Graphics {
     pub cave_culling: bool,
     /// Skip drawing entities hidden behind opaque terrain.
     pub entity_culling: bool,
+    /// Skip the faces between two leaf blocks, so a canopy is one shell of
+    /// outer faces instead of every leaf block's inner ones too. Horizon's own
+    /// option: vanilla draws them, and drawing them is what fills the cut-out
+    /// gaps with the far side of the tree. Off by default.
+    pub leaf_cull: bool,
+    /// Skip drawing block entities (chests, signs, banners, beds, shulkers...)
+    /// hidden behind opaque terrain. Not a vanilla option: vanilla never
+    /// occlusion-culls block entities, and the ones whose models reach outside
+    /// their block (beacons, end gateways, structure and test instance blocks)
+    /// stay exempt here too.
+    pub block_entity_culling: bool,
     /// Meshed sections uploaded per frame; 0 uploads all that are ready.
     pub chunk_updates: u32,
     /// Section mesh bytes uploaded per frame, in KiB; 0 is unlimited.
@@ -418,6 +429,8 @@ impl Default for Graphics {
             far_detail: FarDetail::Full,
             cave_culling: true,
             entity_culling: false,
+            leaf_cull: false,
+            block_entity_culling: false,
             chunk_updates: 0,
             upload_budget_kib: 0,
             sky: true,
@@ -483,6 +496,8 @@ impl Graphics {
                 "farDetail" => g.far_detail = FarDetail::parse(value),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
                 "entityCulling" => g.entity_culling = flag(g.entity_culling),
+                "leafCull" => g.leaf_cull = flag(g.leaf_cull),
+                "blockEntityCulling" => g.block_entity_culling = flag(g.block_entity_culling),
                 "chunkUpdates" => g.chunk_updates = number(g.chunk_updates).min(512),
                 "uploadBudgetKiB" => g.upload_budget_kib = number(g.upload_budget_kib).min(65536),
                 "sky" => g.sky = flag(g.sky),
@@ -538,12 +553,14 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nleafCull:{}\nblockEntityCulling:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiBrightness:{}\nhdrKey:{}\nbatteryMode:{}\ngraphicsApi:{}\npickedShaderPack:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
             bool_text(self.cave_culling),
             bool_text(self.entity_culling),
+            bool_text(self.leaf_cull),
+            bool_text(self.block_entity_culling),
             self.chunk_updates,
             self.upload_budget_kib,
             bool_text(self.sky),
@@ -709,6 +726,8 @@ mod tests {
             far_detail: FarDetail::Reduced,
             cave_culling: false,
             entity_culling: true,
+            leaf_cull: true,
+            block_entity_culling: true,
             chunk_updates: 12,
             upload_budget_kib: 4096,
             sky: false,

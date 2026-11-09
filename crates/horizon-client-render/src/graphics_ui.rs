@@ -27,6 +27,8 @@ pub enum H {
     FarDetail,
     CaveCulling,
     EntityCulling,
+    LeafCull,
+    BlockEntityCulling,
     ChunkUpdates,
     UploadBudget,
     Sky,
@@ -189,6 +191,11 @@ pub fn rows(level: Level) -> Vec<Row> {
                 "Hides models behind opaque blocks. Entities update. Off with custom packs.",
             ),
             h(
+                H::BlockEntityCulling,
+                Saves,
+                "Also hides chests, signs and banners behind blocks. Vanilla never does.",
+            ),
+            h(
                 H::ChunkUpdates,
                 Low,
                 "Meshed sections uploaded per frame. Lower is smoother while loading.",
@@ -237,6 +244,11 @@ pub fn rows(level: Level) -> Vec<Row> {
                 Opt::CutoutLeaves,
                 Medium,
                 "Leaves with see-through gaps. Off draws them solid.",
+            ),
+            h(
+                H::LeafCull,
+                Saves,
+                "Skips the faces inside a canopy: far fewer leaf quads in forests. Needs see-through leaves.",
             ),
             v(
                 Opt::ImprovedTransparency,
@@ -418,6 +430,10 @@ impl H {
             H::FarDetail => labelled("Far Detail", g.far_detail.label()),
             H::CaveCulling => labelled("Cave Culling", on_off(g.cave_culling)),
             H::EntityCulling => labelled("Entity Culling", on_off(g.entity_culling)),
+            H::LeafCull => labelled("Leaf Culling", on_off(g.leaf_cull)),
+            H::BlockEntityCulling => {
+                labelled("Block Entity Culling", on_off(g.block_entity_culling))
+            }
             H::ChunkUpdates => match g.chunk_updates {
                 0 => labelled("Chunk Updates", "Unlimited"),
                 n => labelled("Chunk Updates", lang::tr("%s per frame", &[&n])),
@@ -547,6 +563,8 @@ impl H {
             }
             H::CaveCulling => g.cave_culling = !g.cave_culling,
             H::EntityCulling => g.entity_culling = !g.entity_culling,
+            H::LeafCull => g.leaf_cull = !g.leaf_cull,
+            H::BlockEntityCulling => g.block_entity_culling = !g.block_entity_culling,
             H::Sky => g.sky = !g.sky,
             H::Fog => g.fog = !g.fog,
             H::Weather => g.weather = !g.weather,
@@ -630,6 +648,8 @@ impl Item {
         Some(match self {
             Item::Horizon(H::CaveCulling) => g.cave_culling,
             Item::Horizon(H::EntityCulling) => g.entity_culling,
+            Item::Horizon(H::LeafCull) => g.leaf_cull,
+            Item::Horizon(H::BlockEntityCulling) => g.block_entity_culling,
             Item::Horizon(H::Sky) => g.sky,
             Item::Horizon(H::Fog) => g.fog,
             Item::Horizon(H::Weather) => g.weather,
@@ -1416,5 +1436,48 @@ mod tests {
             assert_eq!(s.horizon.preset, Preset::Custom);
         }
         assert_eq!(item.label(&s).plain(), "Entity Culling: On");
+    }
+
+    #[test]
+    fn block_entity_culling_is_opt_in_and_survives_a_preset() {
+        let mut s = Settings::default();
+        let item = Item::Horizon(H::BlockEntityCulling);
+        // Vanilla never culls block entities, so this starts off.
+        assert_eq!(item.switch(&s), Some(false));
+        assert_eq!(item.label(&s).plain(), "Block Entity Culling: Off");
+        for enabled in [false, true] {
+            s.horizon.block_entity_culling = enabled;
+            for preset in Preset::ALL {
+                crate::graphics::apply_preset(preset, &mut s);
+                assert_eq!(s.horizon.block_entity_culling, enabled);
+            }
+        }
+
+        let mut ui = GraphicsUi::default();
+        let size = (480.0, 4000.0);
+        let (widgets, _, _) = ui.layout(Level::Advanced, &s, size.0, size.1);
+        let switch = widgets
+            .iter()
+            .find(|w| matches!(w.target, Target::Item(i) if i == item))
+            .unwrap();
+        let point = (switch.x + 1.0, switch.y + 1.0);
+        for enabled in [false, true] {
+            s.horizon.preset = Preset::Balanced;
+            assert_eq!(
+                ui.click(
+                    Level::Advanced,
+                    &mut s,
+                    point,
+                    size,
+                    [854, 480],
+                    false,
+                    false
+                ),
+                vec![Action::ButtonClick, Action::Changed]
+            );
+            assert_eq!(item.switch(&s), Some(enabled));
+            assert_eq!(s.horizon.preset, Preset::Custom);
+        }
+        assert_eq!(item.label(&s).plain(), "Block Entity Culling: On");
     }
 }

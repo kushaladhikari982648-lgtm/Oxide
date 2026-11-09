@@ -9685,15 +9685,27 @@ impl Game<'_> {
                                 v.intersects(o - glam::Vec3::ONE, o + glam::Vec3::splat(2.0))
                             })
                     });
-            if self.entity_culler.is_some() || self.pack_ids.is_some() {
+            // Block-entity culling (Horizon's own option: vanilla never hides
+            // these) needs the same one-at-a-time build the entity culler does,
+            // so its own vertices can be measured and dropped; a shader pack
+            // needs a separate model too, for the shadows it draws.
+            let block_culler = self.block_entity_culler(camera);
+            if self.entity_culler.is_some() || block_culler.is_some() || self.pack_ids.is_some() {
                 for block in visible {
                     let start = out.len();
                     self.mark_block_entity(start, block.1);
                     self.res
                         .block_entity_render()
                         .render(&scene, std::iter::once(block), &mut out);
-                    if !off_screen(block.1) && self.entity_culler.is_some() {
-                        self.cull_entity_vertices(&mut out, start);
+                    // The entity culler's own budget already covers these;
+                    // spend the block-entity pass only when it is the reason
+                    // this loop is one-at-a-time.
+                    if !off_screen(block.1) {
+                        if self.entity_culler.is_some() {
+                            self.cull_entity_vertices(&mut out, start);
+                        } else if let Some(culler) = &block_culler {
+                            self.cull_block_entity_vertices(culler, &mut out, start);
+                        }
                     }
                 }
             } else {
@@ -12522,11 +12534,12 @@ impl Game<'_> {
         // Options.biomeBlendRadius, ambientOcclusion and cutoutLeaves:
         // LevelExtractor.allChanged when they change.
         let (s, st) = (&self.settings, &self.streaming);
-        let remesh = (s.biome_blend, s.smooth_lighting, s.cutout_leaves)
-            != (st.biome_blend, st.smooth_lighting, st.cutout_leaves);
+        let remesh = (s.biome_blend, s.smooth_lighting, s.cutout_leaves, s.horizon.leaf_cull)
+            != (st.biome_blend, st.smooth_lighting, st.cutout_leaves, st.leaf_cull);
         self.streaming.biome_blend = self.settings.biome_blend;
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
+        self.streaming.leaf_cull = self.settings.horizon.leaf_cull;
         if remesh {
             self.all_sections_changed();
         }

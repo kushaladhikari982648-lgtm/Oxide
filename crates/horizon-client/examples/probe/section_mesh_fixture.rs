@@ -136,6 +136,9 @@ fn scene(
         blend_radius,
         smooth_lighting,
         cutout_leaves,
+        // The parity gate compares vanilla's faces; the leaf-cull option is
+        // Horizon's own and off in every probe.
+        leaf_cull: false,
     };
     let section_y = int(&row["section_y"])?;
     let started = Instant::now();

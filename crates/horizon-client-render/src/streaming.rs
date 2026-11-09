@@ -179,6 +179,7 @@ struct MeshSettings {
     blend_radius: i32,
     smooth_lighting: bool,
     cutout_leaves: bool,
+    leaf_cull: bool,
 }
 enum Job {
     Generate(i32, i32),
@@ -380,9 +381,10 @@ pub struct Streaming {
     /// `BiomeManager`'s zoom seed (the hashed world seed) and `biomeBlendRadius`.
     pub biome_zoom: BiomeZoom,
     pub biome_blend: i32,
-    /// The `ao` and `cutoutLeaves` options.
+    /// The `ao` and `cutoutLeaves` options, and Horizon's `leafCull`.
     pub smooth_lighting: bool,
     pub cutout_leaves: bool,
+    pub leaf_cull: bool,
     /// Incremental relighting of block edits on lit chunks (see `light::relight`).
     light_tables: Arc<LightTables>,
     /// Applied edits by sequence, replayed onto light jobs snapshotted before them.
@@ -716,6 +718,7 @@ impl Streaming {
                                         blend_radius: settings.blend_radius,
                                         smooth_lighting: settings.smooth_lighting,
                                         cutout_leaves: settings.cutout_leaves,
+                                        leaf_cull: settings.leaf_cull,
                                         assets: &context.assets,
                                         render: &context.render,
                                         tables: &context.tables,
@@ -790,6 +793,7 @@ impl Streaming {
             biome_blend: 2,
             smooth_lighting: true,
             cutout_leaves: true,
+            leaf_cull: false,
             light_tables,
             light_log: Vec::new(),
             light_edit_sequence: 0,
@@ -1584,6 +1588,7 @@ impl Streaming {
                             blend_radius: self.biome_blend,
                             smooth_lighting: self.smooth_lighting,
                             cutout_leaves: self.cutout_leaves,
+                            leaf_cull: self.leaf_cull,
                         },
                     ),
                 );

@@ -60,6 +60,49 @@ impl Game<'_> {
 }
 
 impl Game<'_> {
+    /// A culler for this frame's block entities, when the player turned that on.
+    ///
+    /// Vanilla never occlusion-culls block entities, so this is Horizon's own
+    /// option and stays off by default. Resource packs can replace a chest's or
+    /// a sign's model and texture with something larger than the block, which
+    /// the measured vertices cannot know about, so a pack on is enough to skip
+    /// it — the same reasoning as `prepare_entity_culling`.
+    pub(super) fn block_entity_culler(&self, camera: glam::DVec3) -> Option<Culler> {
+        (self.settings.horizon.block_entity_culling
+            && self.settings.resource_packs.iter().all(|id| id == "vanilla"))
+        .then(|| Culler::new(camera.to_array(), 8_192))
+    }
+
+    /// Drop a block entity's completed vertices when opaque terrain hides them.
+    ///
+    /// `start` is where this block entity's vertices begin; the culler measures
+    /// exactly those, so a chest behind a wall costs no draw and no fragment.
+    pub(super) fn cull_block_entity_vertices(
+        &self,
+        culler: &Culler,
+        vertices: &mut Vec<Vertex>,
+        start: usize,
+    ) {
+        culler.cull_vertices(vertices, start, |pos| {
+            let state = self.world.block(pos[0], pos[1], pos[2]);
+            if !opaque(self.res.facts().get(state)) {
+                return false;
+            }
+            let Some(y) = pos[1].checked_sub(self.world.bottom_y()) else {
+                return false;
+            };
+            let section = (pos[0] >> 4, y.div_euclid(16), pos[2] >> 4);
+            self.renderer
+                .as_ref()
+                .is_some_and(|r| r.has_section(section))
+                && !self.world.dirty_sections.contains(&section)
+                && !self.streaming.is_meshing(section)
+                && !self.pending_uploads.iter().any(|(key, _)| *key == section)
+        });
+    }
+}
+
+impl Game<'_> {
     /// Entity.setViewScale (LevelExtractor.extractVisibleEntities): the entity
     /// distance option times the render distance's boost — 1 at 8 chunks, 2.5
     /// at 20 or more. The render distance is the client setting, capped by
