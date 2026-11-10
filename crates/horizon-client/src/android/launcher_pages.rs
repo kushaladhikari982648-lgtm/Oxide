@@ -273,59 +273,58 @@ impl Launcher {
             "Play".into()
         }
     }
+}
 
-    /// The Zalith-style skin's header control that switches back to the
-    /// default chrome.
-    fn skin_actions(
-        &mut self,
-        ui: &mut Ui,
-        card: [f32; 4],
-        compact: bool,
-        press: Option<[f32; 4]>,
-    ) {
-        // The switch back to the default look rides in the header, level with
-        // the account chip, so it is reachable from every page rather than
-        // buried in Settings.
-        let screen_w = ui.w;
-        skin::quiet(
+/// The Zalith-style skin's actions: the button in its header that switches
+/// back to the default chrome, the filled Play button in the card's foot, and
+/// the UI-opacity slider beside it, dragged the same way the default skin's is.
+///
+/// A free function rather than a method: the draw pass holds `targets` mutably
+/// while it draws, so it cannot lend out `&mut self` for these three widgets.
+fn skin_actions(
+    ui: &mut Ui,
+    targets: &mut Vec<([f32; 4], Action)>,
+    card: [f32; 4],
+    launch: &str,
+    opacity: u8,
+    compact: bool,
+    press: Option<[f32; 4]>,
+) {
+    // The switch back to the default look rides in the header, level with the
+    // account chip, so it is reachable from every page rather than buried in
+    // Settings.
+    skin::quiet(
+        ui,
+        targets,
+        [ui.w - 384.0, 13.0, 140.0, 30.0],
+        "Default UI",
+        Action::Skin,
+        press,
+        13.0,
+    );
+    skin::filled(
+        ui,
+        targets,
+        skin::play_rect(card, compact),
+        launch,
+        Action::Play,
+        press,
+        if compact { 15.0 } else { 17.0 },
+    );
+    if let Some(track) = skin::opacity_track(card, compact) {
+        skin::row_label(
             ui,
-            &mut self.targets,
-            [screen_w - 384.0, 13.0, 140.0, 30.0],
-            "Default UI",
-            Action::Skin,
-            press,
-            13.0,
+            track[0],
+            track[1] - 22.0,
+            track[2],
+            "UI opacity",
+            &format!("{opacity}%"),
         );
-        skin::filled(
-            ui,
-            &mut self.targets,
-            skin::play_rect(card, compact),
-            &self.launch_label(),
-            Action::Play,
-            press,
-            if compact { 15.0 } else { 17.0 },
-        );
-        // The opacity slider sits to the right of Play, on the same baseline,
-        // and is dragged the same way the default skin's is.
-        if let Some(track) = skin::opacity_track(card, compact) {
-            skin::row_label(
-                ui,
-                track[0],
-                track[1] - 22.0,
-                track[2],
-                "UI opacity",
-                &format!("{}%", self.catalog.config.launcher_opacity),
-            );
-            skin::slider(
-                ui,
-                track,
-                opacity_fraction(self.catalog.config.launcher_opacity),
-            );
-            self.targets.push((
-                [track[0], track[1] - 6.0, track[2], track[3] + 12.0],
-                Action::OpacityTrack,
-            ));
-        }
+        skin::slider(ui, track, opacity_fraction(opacity));
+        targets.push((
+            [track[0], track[1] - 6.0, track[2], track[3] + 12.0],
+            Action::OpacityTrack,
+        ));
     }
 }
 
@@ -1598,6 +1597,7 @@ impl Launcher {
         // The repository link rides at the far right of the status strip, level
         // with the status text rather than in a row of its own: there it clears
         // the dock, the pages' bottom buttons and the rule below it.
+        let launch = self.launch_label();
         if skin_card.is_none() {
             button(
                 &mut ui,
@@ -1615,7 +1615,7 @@ impl Launcher {
             dock(
                 &mut ui,
                 &mut self.targets,
-                &self.launch_label(),
+                &launch,
                 self.catalog.config.launcher_opacity,
                 compact,
                 press,
@@ -1628,7 +1628,15 @@ impl Launcher {
                 press,
             );
         } else if let Some(card) = skin_card {
-            self.skin_actions(&mut ui, card, compact, press);
+            skin_actions(
+                &mut ui,
+                &mut self.targets,
+                card,
+                &launch,
+                self.catalog.config.launcher_opacity,
+                compact,
+                press,
+            );
         }
         if self.login.visible {
             self.list_targets.clear();
