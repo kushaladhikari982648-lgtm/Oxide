@@ -1,4 +1,5 @@
 use super::*;
+use crate::launcher_skin as skin;
 use crate::mc_ui::{self, Kind, color};
 use horizon_client::osk::Output;
 use winit::{
@@ -7,7 +8,7 @@ use winit::{
 };
 
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum Action {
+pub(crate) enum Action {
     Page(Page),
     Play,
     Search,
@@ -44,6 +45,8 @@ pub(super) enum Action {
     ChooseRenderScale(crate::display::RenderScale),
     Orientation,
     InputHost,
+    /// Switch between the default launcher chrome and the Zalith-style skin.
+    Skin,
     ChooseInputHost(crate::catalog::InputHost),
     ChooseOrientation(crate::catalog::Orientation),
     ChooseRenderer(crate::catalog::RendererMode),
@@ -125,6 +128,18 @@ fn dock_top(h: f32) -> f32 {
 }
 fn nav_top(h: f32) -> f32 {
     h - NAV_HEIGHT
+}
+
+/// Where a page's own content ends: above the status strip and the dock in the
+/// default skin, or at the card's content area in the Zalith-style skin, which
+/// has no dock to clear. A screen too small for a card gets no skin at all and
+/// falls back to the docked layout, so it keeps the docked page bottom.
+fn page_bottom(style: crate::catalog::Skin, w: f32, h: f32) -> f32 {
+    match style {
+        crate::catalog::Skin::Zalith => skin::card(w, h)
+            .map_or_else(|| content_bottom(h), |card| skin::body(card)[1] + skin::body(card)[3]),
+        crate::catalog::Skin::Oxide => content_bottom(h),
+    }
 }
 
 /// Where the dock and navigation bar put their controls, in dp.
@@ -241,6 +256,77 @@ fn dock(
         [track[0], track[1] - 4.0, track[2], track[3] + 4.0],
         Action::OpacityTrack,
     ));
+}
+
+impl Launcher {
+    /// The primary action's label: Play, or the installation's next step.
+    fn launch_label(&self) -> String {
+        if self.catalog.page == Page::Play && !horizon_client::official_install::ready(&self.home) {
+            if self.error.is_some() {
+                "Retry installation".into()
+            } else if self.worker.is_some() {
+                "Installing".into()
+            } else {
+                "Download Minecraft 26.3".into()
+            }
+        } else {
+            "Play".into()
+        }
+    }
+
+    /// The Zalith-style skin's header control that switches back to the
+    /// default chrome.
+    fn skin_actions(
+        &mut self,
+        ui: &mut Ui,
+        card: [f32; 4],
+        compact: bool,
+        press: Option<[f32; 4]>,
+    ) {
+        // The switch back to the default look rides in the header, level with
+        // the account chip, so it is reachable from every page rather than
+        // buried in Settings.
+        let screen_w = ui.w;
+        skin::quiet(
+            ui,
+            &mut self.targets,
+            [screen_w - 384.0, 13.0, 140.0, 30.0],
+            "Default UI",
+            Action::Skin,
+            press,
+            13.0,
+        );
+        skin::filled(
+            ui,
+            &mut self.targets,
+            skin::play_rect(card, compact),
+            &self.launch_label(),
+            Action::Play,
+            press,
+            if compact { 15.0 } else { 17.0 },
+        );
+        // The opacity slider sits to the right of Play, on the same baseline,
+        // and is dragged the same way the default skin's is.
+        if let Some(track) = skin::opacity_track(card, compact) {
+            skin::row_label(
+                ui,
+                track[0],
+                track[1] - 22.0,
+                track[2],
+                "UI opacity",
+                &format!("{}%", self.catalog.config.launcher_opacity),
+            );
+            skin::slider(
+                ui,
+                track,
+                opacity_fraction(self.catalog.config.launcher_opacity),
+            );
+            self.targets.push((
+                [track[0], track[1] - 6.0, track[2], track[3] + 12.0],
+                Action::OpacityTrack,
+            ));
+        }
+    }
 }
 
 /// `launcher_opacity` (30–100) as a slider position.
@@ -386,6 +472,7 @@ impl Launcher {
         self.list_targets.clear();
         self.list_view = None;
         let mut b = HudBatch::new([r.config.width, r.config.height]);
+        let wallpaper_start = b.vertices.len();
         if let Some(wallpaper) = self.wallpaper.as_ref() {
             let (index, frame) = wallpaper.frame(Instant::now());
             if let Some(rect) = gui
@@ -475,36 +562,97 @@ impl Launcher {
         previous.clear();
         self.targets = previous;
         let scale = ui.density / ui.batch.scale;
-        ui.batch
-            .fill(&gui.atlas, 0.0, 0.0, w * scale, h * scale, color::PAGE);
-        let title_size = if w < 400.0 { 18.0 } else if w < 700.0 { 22.0 } else { 28.0 };
-        let title_y = if w < 700.0 { 12.0 } else { 28.0 };
-        mc_ui::grass_mark(&mut ui, 32.0, title_y + 1.0, title_size);
-        mc_ui::shadow_text(
-            &mut ui,
-            Face::Pixel,
-            title_size,
-            32.0 + title_size + 10.0,
-            title_y,
-            color::TEXT,
-            &format!("Oxide {}", crate::backend::VERSION),
-        );
-        button(
-            &mut ui,
-            &mut self.targets,
-            [
-                if w < 700.0 { 32.0 } else { w - 320.0 },
-                if w < 700.0 { 47.0 } else { 24.0 },
-                if w < 700.0 { w - 64.0 } else { 288.0 },
-                if w < 700.0 { 34.0 } else { 46.0 },
-            ],
-            &self.login.status(&self.catalog.config.name),
-            Action::Account,
-            self.login.signed_in,
-            press,
-        );
         let compact = w < 700.0;
+        // The Zalith-style skin draws its own background, header and a left
+        // navigation rail, and returns the card the page draws into; the
+        // default skin keeps the stone title bar and the dock below.
+        let skin_card = if self.catalog.config.skin == crate::catalog::Skin::Zalith {
+            skin::card(w, h).map(|card| {
+                skin::shell(
+                    &mut ui,
+                    press,
+                    card,
+                    self.catalog.page,
+                    &format!("Oxide {}", crate::backend::VERSION),
+                    &self.login.status(&self.catalog.config.name),
+                    self.login.signed_in,
+                );
+                card
+            })
+        } else {
+            None
+        };
+        if skin_card.is_some() {
+            for (page, rect) in crate::catalog::Page::ALL
+                .iter()
+                .zip(skin::rail_items(h))
+            {
+                self.targets.push((rect, Action::Page(*page)));
+            }
+        } else {
+            ui.batch
+                .fill(&gui.atlas, 0.0, 0.0, w * scale, h * scale, color::PAGE);
+            let title_size = if w < 400.0 { 18.0 } else if w < 700.0 { 22.0 } else { 28.0 };
+            let title_y = if w < 700.0 { 12.0 } else { 28.0 };
+            mc_ui::grass_mark(&mut ui, 32.0, title_y + 1.0, title_size);
+            mc_ui::shadow_text(
+                &mut ui,
+                Face::Pixel,
+                title_size,
+                32.0 + title_size + 10.0,
+                title_y,
+                color::TEXT,
+                &format!("Oxide {}", crate::backend::VERSION),
+            );
+            button(
+                &mut ui,
+                &mut self.targets,
+                [
+                    if w < 700.0 { 32.0 } else { w - 320.0 },
+                    if w < 700.0 { 47.0 } else { 24.0 },
+                    if w < 700.0 { w - 64.0 } else { 288.0 },
+                    if w < 700.0 { 34.0 } else { 46.0 },
+                ],
+                &self.login.status(&self.catalog.config.name),
+                Action::Account,
+                self.login.signed_in,
+                press,
+            );
+        }
         let page = self.catalog.page;
+        // Everything a page draws records its first vertex here. The
+        // Zalith-style skin then moves that run into its card and cuts it to
+        // the card, so page bodies keep drawing at absolute screen coordinates
+        // and stay inside one layout instead of two. The vertices the skin's
+        // chrome drew before the body are kept aside: the body has to be cut
+        // into a card that is already filled, so the card is laid down again
+        // over it afterwards.
+        let chrome_end = ui.batch.vertices.len();
+        let mut chrome_vertices: Vec<horizon_client::hud::HudVertex> = Vec::new();
+        // The body's own vertices begin at 0 once the chrome is set aside.
+        let mut body_start = chrome_end;
+        let body_targets = self.targets.len();
+        // The skin moves the page body; a widget held down last frame had its
+        // rect registered in the moved position, so the body is given the
+        // unmoved rect to draw its pressed state and the chrome keeps the
+        // moved one afterwards.
+        let chrome_press = press;
+        let body_shift = skin_card.map(|card| {
+            let content = skin::body(card);
+            (content[0] - 32.0, content[1] - 1.0)
+        });
+        let press = match body_shift {
+            Some((dx, dy)) => press.map(|mut rect| {
+                rect[0] -= dx;
+                rect[1] -= dy;
+                rect
+            }),
+            None => press,
+        };
+        if skin_card.is_some() {
+            chrome_vertices.extend(ui.batch.vertices.drain(..chrome_end));
+            body_start = 0;
+        }
         if page == Page::Play {
             use horizon_client::official_install::InstallStage;
             let installed = horizon_client::official_install::ready(&self.home);
@@ -611,7 +759,7 @@ impl Launcher {
                     0.0
                 };
                 let overall = (current as f32 + fraction.clamp(0.0, 1.0)) / 6.0;
-                let bar_y = content_bottom(h) - 40.0;
+                let bar_y = page_bottom(self.catalog.config.skin, w, h) - 40.0;
                 mc_ui::progress(&mut ui, [32.0, bar_y, w - 64.0, 12.0], overall);
                 let detail = match progress.stage {
                     InstallStage::Download => format!(
@@ -807,7 +955,7 @@ impl Launcher {
                 press,
             );
             let top = 296.0;
-            let bottom = content_bottom(h);
+            let bottom = page_bottom(self.catalog.config.skin, w, h);
             self.catalog.scroll = self.catalog.scroll.clamp(
                 0.0,
                 (self.catalog.results.len() as f32 * 78.0 - (bottom - top)).max(0.0),
@@ -892,7 +1040,7 @@ impl Launcher {
             button(
                 &mut ui,
                 &mut self.targets,
-                [32.0, content_bottom(h) - 46.0, 120.0, 40.0],
+                [32.0, page_bottom(self.catalog.config.skin, w, h) - 46.0, 120.0, 40.0],
                 "Previous",
                 Action::Previous,
                 false,
@@ -901,7 +1049,7 @@ impl Launcher {
             button(
                 &mut ui,
                 &mut self.targets,
-                [166.0, content_bottom(h) - 46.0, 120.0, 40.0],
+                [166.0, page_bottom(self.catalog.config.skin, w, h) - 46.0, 120.0, 40.0],
                 "Next",
                 Action::Next,
                 false,
@@ -910,7 +1058,7 @@ impl Launcher {
         } else if page == Page::Installed {
             use horizon_client::content_files::Kind;
             let top = 156.0;
-            let bottom = content_bottom(h);
+            let bottom = page_bottom(self.catalog.config.skin, w, h);
             let row_height = if compact { 110.0 } else { 72.0 };
             let total = Kind::ALL
                 .iter()
@@ -1062,12 +1210,12 @@ impl Launcher {
             let row_height = if compact { 82.0 } else { 66.0 };
             // The strip between the title and the status footer the rows live in.
             const LIST_TOP: f32 = 195.0;
-            let list_bottom = content_bottom(h);
+            let list_bottom = page_bottom(self.catalog.config.skin, w, h);
             // The whole list's height, the same expression the rows are laid out
             // with below: a row's extent is `row_height`, but on compact screens
             // its drawn contents and divider run to `row_height + 16`.
             let row_extent = row_height + if compact { 16.0 } else { 0.0 };
-            let list_height = 20.0 * row_extent;
+            let list_height = 21.0 * row_extent;
             let maximum = (list_height - (list_bottom - LIST_TOP)).max(0.0);
             self.catalog.scroll = self.catalog.scroll.clamp(0.0, maximum);
             self.list_view = Some([LIST_TOP, list_bottom, maximum]);
@@ -1085,6 +1233,9 @@ impl Launcher {
                 })
                 .unwrap_or_else(|| "Tap to choose a GIF or MP4".into());
             for (i, (title, value, action)) in [
+                // The skin switch, in the settings list as well as in the
+                // skin's own header, so it is reachable from either look.
+                ("Launcher style", format!("{} (tap to switch)", c.skin.label()), Action::Skin),
                 ("Rendering", c.renderer.label().to_owned(), Action::Renderer),
                 (
                     "Client resolution",
@@ -1321,7 +1472,12 @@ impl Launcher {
             button(
                 &mut ui,
                 &mut self.targets,
-                [w * 0.5 + 6.0, content_bottom(h) - 52.0, w * 0.5 - 38.0, 42.0],
+                [
+                    w * 0.5 + 6.0,
+                    page_bottom(self.catalog.config.skin, w, h) - 52.0,
+                    w * 0.5 - 38.0,
+                    42.0,
+                ],
                 "Microsoft / Xbox account",
                 Action::Account,
                 true,
@@ -1330,12 +1486,87 @@ impl Launcher {
             button(
                 &mut ui,
                 &mut self.targets,
-                [32.0, content_bottom(h) - 52.0, w * 0.5 - 38.0, 42.0],
+                [
+                    32.0,
+                    page_bottom(self.catalog.config.skin, w, h) - 52.0,
+                    w * 0.5 - 38.0,
+                    42.0,
+                ],
                 "Diagnostics",
                 Action::Logs,
                 false,
                 press,
             );
+        }
+        let press = chrome_press;
+        // The skin's card is not where the page body drew itself: move that
+        // run into the card and cut it to the card's edge, so a page that lays
+        // out to the screen's height cannot spill over the rail or the header.
+        // The tap targets the page registered move with their widgets, and the
+        // list geometry the controller's scrolling needs moves with them too.
+        // Anything registered before the body (the account button, the
+        // wallpaper's full-screen rect) is behind the skin's chrome, and one
+        // entry per page covers the card's backdrop so a tap there is gone
+        // rather than landing on a control that is not drawn.
+        if let Some(card) = skin_card {
+            // The live wallpaper is drawn larger than the screen in one axis
+            // and, in the default skin, is part of the page. The skin's card is
+            // the page, so cut the wallpaper to the card as well.
+            // The wallpaper is drawn in GUI pixels, not the UI pixels the page
+            // body uses, so its clip is converted before it is applied.
+            let wallpaper_scale = ui.density / ui.batch.scale;
+            ui.batch.clip_since(
+                wallpaper_start,
+                card[0] * wallpaper_scale,
+                card[1] * wallpaper_scale,
+                (card[0] + card[2]) * wallpaper_scale,
+                (card[1] + card[3]) * wallpaper_scale,
+            );
+            // Page bodies draw at the screen's coordinates, where the default
+            // skin puts this page: its margins begin at 32 dp across and 1 dp
+            // down. `body_shift` carries that origin to the card's content box.
+            let (dx, dy) = body_shift.unwrap_or((0.0, 0.0));
+            // Vertices are UI pixels (dp times `Ui::density`); tap targets stay
+            // in dp. Both move by the same distance, so a widget and the box
+            // that answers for it never drift apart.
+            ui.batch
+                .translate_since(body_start, dx * ui.density, dy * ui.density);
+            ui.batch.clip_since(
+                body_start,
+                card[0] * ui.density,
+                card[1] * ui.density,
+                (card[0] + card[2]) * ui.density,
+                (card[1] + card[3]) * ui.density,
+            );
+            let shift = |rect: &mut [f32; 4]| {
+                rect[0] += dx;
+                rect[1] += dy;
+            };
+            // The rail's targets were registered before the page body and do
+            // not move; the page's own say where their widgets now are. The
+            // account button the default skin drew is not drawn here, so it is
+            // dropped with the rest of the chrome rather than left answering
+            // taps under the card.
+            let mut page_targets = self.targets.split_off(body_targets);
+            let rails: Vec<_> = std::mem::take(&mut self.targets)
+                .into_iter()
+                .filter(|(_, action)| matches!(action, Action::Page(_)))
+                .collect();
+            for (rect, _) in &mut page_targets {
+                shift(rect);
+            }
+            self.targets = rails.into_iter().chain(page_targets).collect();
+            for (rect, _) in &mut self.list_targets {
+                shift(rect);
+            }
+            if let Some(view) = &mut self.list_view {
+                view[0] += dy;
+                view[1] += dy;
+            }
+            // The card is opaque, so it is filled again over the page body; the
+            // header, rail and their labels then go back on top of it, which is
+            // the order the mockup reads in.
+            ui.batch.vertices.extend(chrome_vertices);
         }
         // The status line sits just above the dock, where a page's own content
         // ends, so the launcher's feedback never hides behind the controls.
@@ -1347,14 +1578,19 @@ impl Launcher {
         };
         let status_line: String = status.lines().next().unwrap_or_default().to_owned();
         if !status_line.is_empty() {
-            // Leave the GitHub link's box (72 dp plus margins) unclaimed.
-            let fitted =
-                ui.fit_text(Face::Regular, 13.0, &status_line, (w - 144.0).max(40.0));
+            // Leave the GitHub link's box (72 dp plus margins) in the status
+            // strip; the skin has no link there, so it may use the width.
+            let room = if skin_card.is_some() { w - 64.0 } else { w - 144.0 };
+            let fitted = ui.fit_text(Face::Regular, 13.0, &status_line, room.max(40.0));
             ui.text(
                 Face::Regular,
                 13.0,
                 if compact { 8.0 } else { 32.0 },
-                dock_top(h) - 20.0,
+                if skin_card.is_some() {
+                    h - 20.0
+                } else {
+                    dock_top(h) - 20.0
+                },
                 status_color,
                 &fitted,
             );
@@ -1362,47 +1598,38 @@ impl Launcher {
         // The repository link rides at the far right of the status strip, level
         // with the status text rather than in a row of its own: there it clears
         // the dock, the pages' bottom buttons and the rule below it.
-        button(
-            &mut ui,
-            &mut self.targets,
-            [w - 32.0 - 72.0, dock_top(h) - 22.0, 72.0, 20.0],
-            "GitHub",
-            Action::Repository,
-            false,
-            press,
-        );
-        // A dark rule separates the page from the dock, like vanilla's GUI edges.
-        mc_ui::fill(&mut ui, 0.0, dock_top(h) - 26.0, w, 1.0, color::PANEL_EDGE);
-        // The primary action: Play (or the install's next step) at the left of
-        // the dock, with the live opacity slider at the right.
-        let launch = if self.catalog.page == Page::Play {
-            if horizon_client::official_install::ready(&self.home) {
-                "Play"
-            } else if self.error.is_some() {
-                "Retry installation"
-            } else if self.worker.is_some() {
-                "Installing"
-            } else {
-                "Download Minecraft 26.3"
-            }
-        } else {
-            "Play"
-        };
-        dock(
-            &mut ui,
-            &mut self.targets,
-            launch,
-            self.catalog.config.launcher_opacity,
-            compact,
-            press,
-        );
-        navigation(
-            &mut ui,
-            &mut self.targets,
-            self.catalog.page,
-            compact,
-            press,
-        );
+        if skin_card.is_none() {
+            button(
+                &mut ui,
+                &mut self.targets,
+                [w - 32.0 - 72.0, dock_top(h) - 22.0, 72.0, 20.0],
+                "GitHub",
+                Action::Repository,
+                false,
+                press,
+            );
+            // A dark rule separates the page from the dock, like vanilla's GUI edges.
+            mc_ui::fill(&mut ui, 0.0, dock_top(h) - 26.0, w, 1.0, color::PANEL_EDGE);
+            // The primary action: Play (or the install's next step) at the left of
+            // the dock, with the live opacity slider at the right.
+            dock(
+                &mut ui,
+                &mut self.targets,
+                &self.launch_label(),
+                self.catalog.config.launcher_opacity,
+                compact,
+                press,
+            );
+            navigation(
+                &mut ui,
+                &mut self.targets,
+                self.catalog.page,
+                compact,
+                press,
+            );
+        } else if let Some(card) = skin_card {
+            self.skin_actions(&mut ui, card, compact, press);
+        }
         if self.login.visible {
             self.list_targets.clear();
             self.list_view = None;
@@ -1549,6 +1776,15 @@ impl Launcher {
             audio.play_button_click();
         }
         match action {
+            Some(Action::Skin) => {
+                self.catalog.config.skin = self.catalog.config.skin.toggled();
+                self.catalog.status = format!(
+                    "Launcher style: {}. Both show the same pages.",
+                    self.catalog.config.skin.label()
+                );
+                self.catalog.config.save(&self.home)?;
+                self.redraw_now = true;
+            }
             Some(Action::OpacityTrack) => {
                 // A tap (no drag) on the track still moves the thumb there.
                 let density = f64::from(self.ui_density());
@@ -1884,11 +2120,22 @@ impl Launcher {
         if density <= 0.0 {
             return None;
         }
-        let track = dock_layout(w, h, w < 700.0).slider?;
+        let track = self.opacity_slider()?;
         let px = (x / density) as f32;
         let py = (y / density) as f32;
         (px >= track[0] && px <= track[0] + track[2] && py >= track[1] && py <= track[1] + track[3])
             .then_some(track[2])
+    }
+
+    /// The opacity slider's track for the skin in use: the dock's slider in the
+    /// default skin, the card's in the Zalith-style one.
+    fn opacity_slider(&self) -> Option<[f32; 4]> {
+        let (w, h, _) = self.screen;
+        if self.catalog.config.skin == crate::catalog::Skin::Zalith {
+            skin::opacity_track(skin::card(w, h)?, w < 700.0)
+        } else {
+            dock_layout(w, h, w < 700.0).slider
+        }
     }
 
     /// Apply the opacity percentage under the finger. The slider spans 30–100%,
@@ -1897,8 +2144,7 @@ impl Launcher {
         if self.opacity_drag.is_none() || density <= 0.0 {
             return;
         }
-        let (w, h, _) = self.screen;
-        let Some(track) = dock_layout(w, h, w < 700.0).slider else {
+        let Some(track) = self.opacity_slider() else {
             return;
         };
         let local = (x / density) as f32 - track[0];
@@ -2014,6 +2260,45 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The skin's card must stay clear of the rail and the header, and hold a
+    /// usable page on the smallest screen the launcher supports.
+    #[test]
+    fn the_skin_card_clears_the_rail_and_the_header() {
+        for (w, h) in [(640.0, 360.0), (800.0, 480.0), (1280.0, 800.0)] {
+            let card = skin::card(w, h).expect("room for a card");
+            assert!(card[0] >= skin::RAIL_WIDTH, "{w}x{h}: card overlaps the rail");
+            assert!(card[1] >= skin::HEADER_HEIGHT, "{w}x{h}: card overlaps the header");
+            assert!(card[0] + card[2] <= w, "{w}x{h}: card runs off the right");
+            assert!(card[1] + card[3] <= h, "{w}x{h}: card runs off the bottom");
+            let body = skin::body(card);
+            assert!(body[2] > 0.0 && body[3] > 0.0, "{w}x{h}: empty body");
+            // Every rail item is inside the rail and above the bottom edge.
+            for rect in skin::rail_items(h) {
+                assert!(rect[0] + rect[2] <= skin::RAIL_WIDTH);
+                assert!(rect[1] + rect[3] <= h, "{w}x{h}: a rail item runs off the bottom");
+            }
+        }
+        // A screen too small for both gets no card rather than an overlap.
+        assert_eq!(skin::card(320.0, 200.0), None);
+    }
+
+    /// A page's content ends at the card, not at the dock it does not have.
+    #[test]
+    fn the_skin_page_ends_at_its_card() {
+        let (w, h) = (1280.0, 800.0);
+        let card = skin::card(w, h).unwrap();
+        let body = skin::body(card);
+        assert_eq!(
+            page_bottom(crate::catalog::Skin::Zalith, w, h),
+            body[1] + body[3]
+        );
+        // The default skin is unchanged.
+        assert_eq!(
+            page_bottom(crate::catalog::Skin::Oxide, w, h),
+            content_bottom(h)
+        );
+    }
 
     #[test]
     fn the_opacity_slider_spans_the_settings_range() {

@@ -6,6 +6,8 @@
 mod game;
 #[path = "android/launcher.rs"]
 mod launcher;
+#[path = "android/launcher_skin.rs"]
+mod launcher_skin;
 #[path = "android/mc_ui.rs"]
 mod mc_ui;
 // Share the desktop launcher's actual search, compatibility checks, downloads,

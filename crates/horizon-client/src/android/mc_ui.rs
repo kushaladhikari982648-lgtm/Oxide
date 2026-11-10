@@ -63,6 +63,28 @@ pub mod color {
     pub const RED_TEXT: u32 = hex(0xe28878, 255);
     /// Status-line errors.
     pub const ERROR: u32 = hex(0xe88177, 255);
+    /// The "Zalith" skin (`skin`): a Material-style set, deliberately flat
+    /// rather than bevelled, so the two skins never look like each other.
+    /// The shell behind everything, darker than the cards that float on it.
+    pub const M3_BG: u32 = hex(0x1b1b1f, 255);
+    /// Cards, the header strip and the panels rows sit in.
+    pub const M3_SURFACE: u32 = hex(0x232327, 255);
+    /// A row or chip that is itself selectable.
+    pub const M3_ROW: u32 = hex(0x2a2a2f, 255);
+    /// The navigation rail's selected pill and every filled accent control.
+    pub const M3_ACCENT: u32 = hex(0xa8d5c6, 255);
+    pub const M3_ACCENT_PRESSED: u32 = hex(0x8fbfae, 255);
+    /// Text on the accent: the one dark thing on a light plate.
+    pub const M3_ON_ACCENT: u32 = hex(0x11261f, 255);
+    /// The accent used as text or as a thin rule rather than a fill.
+    pub const M3_ACCENT_TEXT: u32 = hex(0xa8d5c6, 255);
+    /// Material's body text and its second level.
+    pub const M3_TEXT: u32 = hex(0xe9e9ee, 255);
+    pub const M3_MUTED: u32 = hex(0xa0a0a8, 255);
+    /// Slider and switch tracks, off.
+    pub const M3_TRACK: u32 = hex(0x4a4a52, 255);
+    /// Hairlines between rows: Material's outline variant.
+    pub const M3_OUTLINE: u32 = hex(0x35353c, 255);
     /// Edit fields: vanilla's black box in a gray frame (white when focused).
     pub const FIELD_BG: u32 = hex(0x0a0a0c, 255);
     pub const FIELD_BORDER: u32 = hex(0x6a6a74, 255);

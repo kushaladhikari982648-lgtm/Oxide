@@ -124,6 +124,10 @@ pub struct Config {
     /// Launcher controls and page veil opacity, independent of the wallpaper.
     #[serde(default = "default_launcher_opacity")]
     pub launcher_opacity: u8,
+    /// Which launcher chrome is drawn (see [`Skin`]). Saved, not per session:
+    /// a player who switches away from the default stays there.
+    #[serde(default)]
+    pub skin: Skin,
     /// Original display name for the private looping GIF wallpaper file.
     pub wallpaper_name: Option<String>,
     #[serde(flatten)]
@@ -325,6 +329,48 @@ impl Page {
     }
     pub fn is_catalog(self) -> bool {
         matches!(self, Self::Packs | Self::Mods | Self::Shaders)
+    }
+    /// The page's name in the Zalith-style navigation rail's two-word form.
+    pub fn rail_name(self) -> &'static str {
+        match self {
+            Self::Play => "Play",
+            Self::Mods => "Controls",
+            Self::Packs => "Packs",
+            Self::Shaders => "Shaders",
+            Self::Installed => "Files",
+            Self::Settings => "Settings",
+        }
+    }
+}
+/// Which launcher chrome is drawn: Oxide's own bottom-docked stone layout, or
+/// the Material-style skin (a left navigation rail and floating cards) kept
+/// for players coming from Zalith Launcher.
+///
+/// Only the chrome differs. Both skins show the same pages, draw the same
+/// actions and register the same tap targets, so a player can switch without
+/// losing their place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Skin {
+    /// Stone buttons, the dock at the bottom left, Play beside the slider.
+    #[default]
+    Oxide,
+    /// Flat Material cards behind a left-hand navigation rail.
+    Zalith,
+}
+impl Skin {
+    pub const ALL: [Self; 2] = [Self::Oxide, Self::Zalith];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Oxide => "Oxide",
+            Self::Zalith => "Zalith-style",
+        }
+    }
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Oxide => Self::Zalith,
+            Self::Zalith => Self::Oxide,
+        }
     }
 }
 enum Reply {

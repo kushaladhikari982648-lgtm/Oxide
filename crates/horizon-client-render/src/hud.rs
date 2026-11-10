@@ -1190,6 +1190,18 @@ impl HudBatch {
             v.pos[1] = cy + (v.pos[1] - cy) * sy;
         }
     }
+    /// Move the vertices pushed since `start` by `(dx, dy)` in GUI pixels (a
+    /// pose matrix of a bare translate), for a layout that drew its page where
+    /// the screen puts it and has to sit inside a card instead.
+    pub fn translate_since(&mut self, start: usize, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        for v in &mut self.vertices[start..] {
+            v.pos[0] += dx;
+            v.pos[1] += dy;
+        }
+    }
     pub fn clip_since(&mut self, start: usize, x0: f32, y0: f32, x1: f32, y1: f32) {
         let quads: Vec<[HudVertex; 6]> = self.vertices[start..].as_chunks::<6>().0.to_vec();
         self.vertices.truncate(start);
