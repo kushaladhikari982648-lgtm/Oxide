@@ -258,20 +258,22 @@ fn dock(
     ));
 }
 
-impl Launcher {
-    /// The primary action's label: Play, or the installation's next step.
-    fn launch_label(&self) -> String {
-        if self.catalog.page == Page::Play && !horizon_client::official_install::ready(&self.home) {
-            if self.error.is_some() {
-                "Retry installation".into()
-            } else if self.worker.is_some() {
-                "Installing".into()
-            } else {
-                "Download Minecraft 26.3".into()
-            }
+/// The primary action's label: Play, or the installation's next step.
+///
+/// A free function taking only what it reads, not a method: the draw pass holds
+/// its renderer and its targets mutably while it draws, so a call borrowing all
+/// of `self` there would not compile.
+fn launch_label(page: Page, installed: bool, error: bool, working: bool) -> String {
+    if page == Page::Play && !installed {
+        if error {
+            "Retry installation".into()
+        } else if working {
+            "Installing".into()
         } else {
-            "Play".into()
+            "Download Minecraft 26.3".into()
         }
+    } else {
+        "Play".into()
     }
 }
 
@@ -449,6 +451,12 @@ impl Launcher {
     }
 
     pub(super) fn draw_pages(&mut self) -> Result<()> {
+        let launch = launch_label(
+            self.catalog.page,
+            horizon_client::official_install::ready(&self.home),
+            self.error.is_some(),
+            self.worker.is_some(),
+        );
         if let (Some(wallpaper), Some(gui)) = (self.wallpaper.as_mut(), self.gui.as_ref())
             && let Some(rect) = gui
                 .atlas
@@ -1597,7 +1605,6 @@ impl Launcher {
         // The repository link rides at the far right of the status strip, level
         // with the status text rather than in a row of its own: there it clears
         // the dock, the pages' bottom buttons and the rule below it.
-        let launch = self.launch_label();
         if skin_card.is_none() {
             button(
                 &mut ui,
